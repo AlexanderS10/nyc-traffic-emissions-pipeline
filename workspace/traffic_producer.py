@@ -84,3 +84,4 @@ if __name__ == "__main__":
     while True:
         last_seen_ts = fetch_and_send(last_seen_ts)
         time.sleep(POLL_INTERVAL)
+# %%

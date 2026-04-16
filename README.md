@@ -35,7 +35,7 @@ This project implements a modern Data Lakehouse streaming architecture:
 **Primary High-Velocity Streams:**
 
 * [NYC DOT Real-Time Traffic Speeds](https://data.cityofnewyork.us/Transportation/DOT-Traffic-Speeds-NBE/i4gi-tjb9)
-* [OpenAQ Air Quality API (v3)](https://docs.openaq.org)
+* [OpenAQ Air Quality API (v3)](https://docs.openaq.org) (https://explore.openaq.org/register)
 * [NOAA National Weather Service API](https://www.weather.gov/documentation/services-web-api)
 
 **Static / Lookup Datasets:**
