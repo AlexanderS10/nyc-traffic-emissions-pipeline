@@ -8,7 +8,7 @@ from confluent_kafka import Producer
 # Load variables from .env
 load_dotenv()
 
-KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
+KAFKA_BROKER = "redpanda:29092"
 TOPIC_NAME   = "nyc_weather_raw"
 POLL_INTERVAL = 1800  # 30 minutes (Weather updates slowly, no need to spam the API)
 

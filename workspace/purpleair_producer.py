@@ -9,7 +9,7 @@ from confluent_kafka import Producer
 load_dotenv()
 
 PURPLEAIR_API_KEY = os.getenv("PURPLEAIR_API_KEY")
-KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
+KAFKA_BROKER = "redpanda:29092"
 TOPIC_NAME   = "nyc_purpleair_raw"
 POLL_INTERVAL = 120  # 2 minutes (PurpleAir updates relatively frequently)
 

@@ -1,5 +1,4 @@
 services:
-  # --- 1. THE INGESTION LAYER (MESSAGE BROKER) ---
   redpanda:
     image: redpandadata/redpanda:v24.2.7
     container_name: redpanda
@@ -19,28 +18,33 @@ services:
     volumes:
       - redpanda_data:/var/lib/redpanda/data
 
-  # --- 2. THE PROCESSING ENGINE (SPARK 4.0.2) ---
   spark-master:
-    image: apache/spark:4.0.2
+    build: .
     container_name: spark-master
-    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    command: /usr/local/spark/bin/spark-class org.apache.spark.deploy.master.Master
     environment:
       - SPARK_MASTER_HOST=spark-master
+      - SPARK_LOCAL_DIRS=/tmp/spark-local
+      - PYSPARK_PYTHON=/opt/conda/bin/python
+      - PYSPARK_DRIVER_PYTHON=/opt/conda/bin/python
     ports:
       - "8080:8080"
       - "7077:7077"
 
   spark-worker:
-    image: apache/spark:4.0.2
+    build: .
     container_name: spark-worker
-    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    command: /usr/local/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
     environment:
       - SPARK_WORKER_MEMORY=4g
       - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_DIR=/tmp/spark-work
+      - SPARK_LOCAL_DIRS=/tmp/spark-local
+      - PYSPARK_PYTHON=/opt/conda/bin/python
+      - PYSPARK_DRIVER_PYTHON=/opt/conda/bin/python
     depends_on:
       - spark-master
 
-  # --- 3. THE STORAGE ARCHITECTURE (S3 DATA LAKE REPLACEMENT) ---
   minio:
     image: minio/minio:RELEASE.2025-01-20T14-49-07Z
     container_name: minio
@@ -54,14 +58,12 @@ services:
     volumes:
       - minio_data:/data
 
-  # --- 4. THE QUERY ENGINE ---
   trino:
     image: trinodb/trino:480
     container_name: trino
     ports:
       - "8081:8080"
 
-  # --- 5. THE SERVING LAYER (DASHBOARD) ---
   grafana:
     image: grafana/grafana:11.4.0
     container_name: grafana
@@ -74,19 +76,18 @@ services:
     volumes:
       - grafana_data:/var/lib/grafana
 
-  # --- 6. THE INTERACTIVE DEVELOPMENT ENVIRONMENT ---
-  # Built from the local Dockerfile which pins pyspark==4.0.2 to match
-  # the apache/spark:4.0.2 cluster above. Run `docker compose build` first,
-  # or `docker compose up --build` on first launch.
   jupyter:
-    build: .                          # uses the Dockerfile in the same folder
+    build: .
     container_name: jupyter-pyspark
     ports:
       - "8888:8888"
-      - "4040:4040"                   # Spark UI for the running job
+      - "4040:4040"
     environment:
       - JUPYTER_ENABLE_LAB=yes
       - JUPYTER_TOKEN=bigdata
+      - SPARK_LOCAL_DIRS=/tmp/spark-local
+      - PYSPARK_PYTHON=/opt/conda/bin/python
+      - PYSPARK_DRIVER_PYTHON=/opt/conda/bin/python
     volumes:
       - ./workspace:/home/jovyan/work
     depends_on:

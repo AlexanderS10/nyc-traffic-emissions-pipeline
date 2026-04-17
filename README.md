@@ -80,7 +80,7 @@ Jupyter Lab (PySpark IDE): ```http://localhost:8888/lab?token=bigdata```
 
 Spark Master UI: ```http://localhost:8080```
 
-MinIO Console (S3): ```http://localhost:9001``` (admin / password)
+MinIO Console (S3): ```http://localhost:9001``` (admin / password) !Create the bucker also called "data-lake"
 
 Grafana Dashboard: ```http://localhost:3000``` (admin / admin)
 

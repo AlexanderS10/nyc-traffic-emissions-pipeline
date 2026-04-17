@@ -13,7 +13,7 @@ OPENAQ_API_KEY = os.getenv("OPENAQ_API_KEY")
 
 # If running this script directly on your Mac, use localhost:9092
 # If running inside the Jupyter docker container, use redpanda:29092
-KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
+KAFKA_BROKER = "redpanda:29092"
 TOPIC_NAME   = "nyc_openaq_raw"
 POLL_INTERVAL = 300  # 5 minutes (air quality doesn't change by the second)
 
