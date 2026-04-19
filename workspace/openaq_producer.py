@@ -2,28 +2,24 @@ import requests
 import json
 import time
 import os
-from datetime import datetime, timezone
 from dotenv import load_dotenv
 from confluent_kafka import Producer
 
-# Load API keys from the .env file
 load_dotenv()
 
 OPENAQ_API_KEY = os.getenv("OPENAQ_API_KEY")
+KAFKA_BROKER   = "redpanda:29092"
+TOPIC_NAME     = "nyc_openaq_raw"
+POLL_INTERVAL  = 300  # 5 minutes
 
-# If running this script directly on your Mac, use localhost:9092
-# If running inside the Jupyter docker container, use redpanda:29092
-KAFKA_BROKER = "redpanda:29092"
-TOPIC_NAME   = "nyc_openaq_raw"
-POLL_INTERVAL = 300  # 5 minutes (air quality doesn't change by the second)
+LOCATIONS_URL    = "https://api.openaq.org/v3/locations"
+MEASUREMENTS_URL = "https://api.openaq.org/v3/sensors/{sensor_id}/measurements"
 
-# OpenAQ v3 API endpoint for NYC (using a bounding box or coordinates for NYC)
-# This example uses coordinates roughly bounding New York City
-API_URL = "https://api.openaq.org/v3/locations"
-PARAMS = {
+# 25km radius around NYC centre — catches all 5 boroughs
+LOCATION_PARAMS = {
     "coordinates": "40.7128,-74.0060",
-    "radius": 25000, # 25km radius around NYC
-    "limit": 100
+    "radius": 25000,
+    "limit": 50,
 }
 
 producer = Producer({
@@ -31,59 +27,109 @@ producer = Producer({
     "client.id": "nyc-openaq-producer"
 })
 
+
 def delivery_report(err, msg):
     if err is not None:
-        print(f"Delivery failed for key {msg.key()}: {err}")
+        print(f"[kafka] Delivery failed for {msg.key()}: {err}")
+
 
 def fetch_and_send():
-    """
-    Fetches the latest air quality readings for NYC and pushes them to Kafka.
-    """
     if not OPENAQ_API_KEY:
-        print("Error: OPENAQ_API_KEY not found in .env file.")
+        print("ERROR: OPENAQ_API_KEY not found in .env")
         return
 
     headers = {
         "X-API-Key": OPENAQ_API_KEY,
-        "Accept": "application/json"
+        "Accept":    "application/json"
     }
 
+    # ── Step 1: Discover NYC sensor locations ─────────────────────────────────
     try:
-        print("Fetching OpenAQ data for NYC...")
-        response = requests.get(API_URL, headers=headers, params=PARAMS, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        
-        # OpenAQ v3 typically returns a "results" array
-        records = data.get("results", [])
+        print("Fetching OpenAQ locations for NYC...")
+        loc_resp = requests.get(LOCATIONS_URL, headers=headers,
+                                params=LOCATION_PARAMS, timeout=30)
+        loc_resp.raise_for_status()
+        locations = loc_resp.json().get("results", [])
+    except requests.exceptions.RequestException as e:
+        print(f"Locations fetch error: {e}")
+        return
 
-        if not records:
-            print("No records found in this polling window.")
-            return
+    if not locations:
+        print("No locations returned.")
+        return
 
-        for record in records:
-            # Use the location ID as the Kafka key for partitioning
-            location_id = str(record.get("id", "unknown"))
-            payload   = json.dumps(record)
+    pushed = 0
+
+    # ── Step 2: For each location pull its latest PM2.5 reading ───────────────
+    for location in locations:
+        location_id   = location.get("id")
+        location_name = location.get("name", "unknown")
+        coordinates   = location.get("coordinates", {})
+
+        for sensor in location.get("sensors", []):
+            param = sensor.get("parameter", {})
+
+            # param can be a dict (v3) or a string (older responses) — handle both
+            param_name = (
+                param.get("name") if isinstance(param, dict) else str(param)
+            )
+
+            # Only pull PM2.5 to stay within rate limits
+            if param_name != "pm25":
+                continue
+
+            sensor_id = sensor.get("id")
+            if not sensor_id:
+                continue
+
+            try:
+                meas_resp = requests.get(
+                    MEASUREMENTS_URL.format(sensor_id=sensor_id),
+                    headers=headers,
+                    params={"limit": 1},  # only the most recent reading
+                    timeout=30
+                )
+                meas_resp.raise_for_status()
+                readings = meas_resp.json().get("results", [])
+            except requests.exceptions.RequestException as e:
+                print(f"  Sensor {sensor_id} error: {e}")
+                continue
+
+            if not readings:
+                continue
+
+            reading = readings[0]
+
+            # Build a flat, schema-friendly payload for Spark
+            payload = {
+                "sensor_id":     sensor_id,
+                "location_id":   location_id,
+                "location_name": location_name,
+                "latitude":      coordinates.get("latitude"),
+                "longitude":     coordinates.get("longitude"),
+                "parameter":     param_name,
+                "value":         reading.get("value"),          # the PM2.5 μg/m³ reading
+                "unit":          reading.get("parameter", {}).get("units"),
+                "datetime_utc":  reading.get("period", {}).get("datetimeTo", {}).get("utc"),
+            }
 
             producer.produce(
                 topic=TOPIC_NAME,
-                key=location_id.encode("utf-8"),
-                value=payload.encode("utf-8"),
+                key=str(sensor_id).encode("utf-8"),
+                value=json.dumps(payload).encode("utf-8"),
                 callback=delivery_report,
             )
+            pushed += 1
 
-        producer.flush()
-        print(f"Pushed {len(records)} location records to '{TOPIC_NAME}'.")
+        # Small courtesy delay between sensor calls to respect rate limits
+        time.sleep(0.2)
 
-    except requests.exceptions.RequestException as e:
-        print(f"API Error: {e}")
-    except Exception as e:
-        print(f"Unexpected Error: {e}")
+    producer.flush()
+    print(f"Pushed {pushed} PM2.5 readings to '{TOPIC_NAME}'.")
+
 
 if __name__ == "__main__":
     print(f"Starting NYC OpenAQ Producer. Polling every {POLL_INTERVAL}s...")
     while True:
         fetch_and_send()
         time.sleep(POLL_INTERVAL)
-# %%

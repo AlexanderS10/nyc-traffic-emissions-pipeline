@@ -58,11 +58,34 @@ services:
     volumes:
       - minio_data:/data
 
+  rest-catalog:
+    image: apache/iceberg-rest-fixture
+    container_name: rest-catalog
+    ports:
+      - "8181:8181"
+    environment:
+      - CATALOG_WAREHOUSE=s3a://data-lake/
+      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
+      - CATALOG_S3_ENDPOINT=http://minio:9000
+      - CATALOG_S3_PATH__STYLE__ACCESS=true      
+      - AWS_ACCESS_KEY_ID=admin                  
+      - AWS_SECRET_ACCESS_KEY=password          
+      - AWS_REGION=us-east-1
+    depends_on:
+      - minio                                  
+
   trino:
     image: trinodb/trino:480
     container_name: trino
+    environment:
+      - JAVA_TOOL_OPTIONS="-Xmx2G"
     ports:
       - "8081:8080"
+    volumes:
+      - ./trino_config/iceberg.properties:/etc/trino/catalog/iceberg.properties
+    depends_on:
+      - rest-catalog
+      - minio
 
   grafana:
     image: grafana/grafana:11.4.0
@@ -92,6 +115,7 @@ services:
       - ./workspace:/home/jovyan/work
     depends_on:
       - spark-master
+      - rest-catalog
 
 volumes:
   redpanda_data:
