@@ -21,36 +21,36 @@ RUN pip install --quiet --no-cache-dir \
     \
     # ── Kafka / Ingestion ─────────────────────────────────────────────────────
     # confluent-kafka is more robust than kafka-python for production streaming
-    confluent-kafka \
-    kafka-python \
+    confluent-kafka==2.14.0 \
+    kafka-python==2.3.1 \
     requests \
-    python-dotenv \
+    python-dotenv==1.2.2 \
     \
     # ── Spatial / Geospatial ──────────────────────────────────────────────────
     # apache-sedona: Spark spatial SQL (stream-to-stream spatial joins)
-    apache-sedona \
+    apache-sedona==1.8.1 \
     # shapely: geometry objects (points, polygons) used by Sedona
-    shapely \
+    shapely==2.1.2 \
     # h3: Uber's hex-grid indexing for fast spatial bucketing
-    h3 \
+    h3==4.4.2 \
     # geopandas + fiona: reading shapefiles for truck routes & congestion zones
-    geopandas \
-    fiona \
+    geopandas==1.1.3 \
+    fiona==1.10.1 \
     \
     # ── Apache Iceberg Data Lake ───────────────────────────────────────────────
     # pyiceberg[s3fs]: Python Iceberg client; s3fs extra lets it talk to MinIO
-    "pyiceberg[s3fs,pyarrow]" \
+    "pyiceberg[s3fs,pyarrow]==0.11.0" \
     \
     # ── S3 / MinIO access ─────────────────────────────────────────────────────
     # boto3: AWS-compatible SDK, works with MinIO
-    boto3 \
+    boto3==1.42.84 \
     # s3fs: filesystem-style access to S3/MinIO (used by pyiceberg & pandas)
-    s3fs \
+    s3fs==2026.3.0 \
     \
     # ── Data manipulation ─────────────────────────────────────────────────────
     pandas \
-    pyarrow \
+    pyarrow==17.0.0 \
     \
     # ── Visualization / Dashboard support ─────────────────────────────────────
     # plotly: for exploratory charts inside Jupyter before Grafana is wired up
-    plotly
+    plotly==6.7.0

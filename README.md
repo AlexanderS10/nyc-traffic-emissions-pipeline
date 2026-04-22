@@ -24,8 +24,8 @@ NOAA API    ──┘         Topics                  H3 Spatial Join
 1. **Ingestion (Redpanda/Kafka):** Python producers continuously poll NYC DOT, OpenAQ, PurpleAir, and NOAA APIs, publishing JSON payloads into dedicated Kafka topics.
 2. **Stream Processing (PySpark 4.0.2):** Spark Structured Streaming consumes topics, applies event-time watermarking, and assigns H3 hex grid IDs (resolution 5) for spatial indexing.
 3. **Multi-Stream Join:** Traffic nodes and air sensors sharing the same H3 grid cell are joined within a 15-minute sliding window. Weather data joins on a 2-hour window using a broadcast key.
-4. **Resilient Storage (MinIO + Apache Iceberg):** The enriched stream is continuously written to an S3-compatible Data Lake with ACID compliance via Iceberg.
-5. **Serving Layer (Trino + Grafana):** Trino queries Iceberg tables, powering a live Grafana dashboard with borough-level traffic and air quality panels.
+4. **Medallion Storage (MinIO + Apache Iceberg):** The pipeline writes into three distinct buckets: `raw-data` for raw Kafka JSON landed as Parquet, `refined-data` for cleaned and spatially indexed Parquet, and `business-data` for the final ACID-compliant Apache Iceberg table.
+5. **Serving Layer (Trino + Grafana):** Trino queries the Iceberg tables in `business-data`, powering a live Grafana dashboard with borough-level traffic and air quality panels.
 
 ---
 
@@ -37,7 +37,7 @@ NOAA API    ──┘         Topics                  H3 Spatial Join
 | Message Broker | Redpanda v24.2.7 (Kafka API compatible) |
 | Stream Processing | Apache Spark 4.0.2 (Structured Streaming) |
 | Geospatial Indexing | H3 (Uber hex grid), Apache Sedona |
-| Data Lake Storage | MinIO (S3-compatible) |
+| Data Lake Storage | MinIO (S3-compatible, Medallion buckets: `raw-data`, `refined-data`, `business-data`) |
 | Table Format | Apache Iceberg 1.10.1 |
 | REST Catalog | apache/iceberg-rest-fixture |
 | Query Engine | Trino 480 |
@@ -104,16 +104,9 @@ docker compose up -d --build
 
 This builds the custom PySpark 4.0.2 Jupyter image and starts all services. First build takes ~5–10 minutes.
 
-### 4. Create the MinIO Bucket
+### 4. MinIO Buckets
 
-Open the MinIO console at **http://localhost:9001** (login: `admin` / `password`), click **Create Bucket**, and name it `data-lake`.
-
-Alternatively from the terminal:
-
-```bash
-docker exec -it minio mc alias set myminio http://localhost:9000 admin password
-docker exec -it minio mc mb myminio/data-lake
-```
+The `minio-init` container creates the `raw-data`, `refined-data`, and `business-data` buckets automatically on startup, so no manual MinIO setup is required.
 
 ### 5. Verify All Services Are Running
 
@@ -325,15 +318,20 @@ docker exec -it redpanda rpk topic create nyc_traffic_raw
 # Set up the mc alias (required once per terminal session)
 docker exec -it minio mc alias set myminio http://localhost:9000 admin password
 
-# Browse the data lake
-docker exec -it minio mc ls myminio/data-lake/
-docker exec -it minio mc ls --recursive myminio/data-lake/
+# Browse the Medallion buckets
+docker exec -it minio mc ls myminio/raw-data/
+docker exec -it minio mc ls myminio/refined-data/
+docker exec -it minio mc ls myminio/business-data/
 
-# Clear a stale Spark checkpoint (required after pipeline errors)
-docker exec -it minio mc rm -r --force myminio/data-lake/checkpoints/
+# Clear stale Spark checkpoints (required after pipeline errors)
+docker exec -it minio mc rm -r --force myminio/raw-data/checkpoints/
+docker exec -it minio mc rm -r --force myminio/refined-data/checkpoints/
+docker exec -it minio mc rm -r --force myminio/business-data/checkpoints/
 
 # Check bucket size
-docker exec -it minio mc du myminio/data-lake
+docker exec -it minio mc du myminio/raw-data
+docker exec -it minio mc du myminio/refined-data
+docker exec -it minio mc du myminio/business-data
 ```
 
 ### Spark Streaming Issues
@@ -355,7 +353,9 @@ The watermark window requires all streams to have overlapping event timestamps. 
 **Stale checkpoint causing schema mismatch:**
 ```bash
 # Clear all checkpoints and restart from the top
-docker exec -it minio mc rm -r --force myminio/data-lake/checkpoints/
+docker exec -it minio mc rm -r --force myminio/raw-data/checkpoints/
+docker exec -it minio mc rm -r --force myminio/refined-data/checkpoints/
+docker exec -it minio mc rm -r --force myminio/business-data/checkpoints/
 # Then restart the Jupyter kernel and re-run all cells
 ```
 
@@ -409,6 +409,8 @@ The NOAA grid coordinates change over time. Never hardcode `/gridpoints/OKX/X,Y`
 **Air quality NULLs:** OpenAQ has sparse sensor coverage in NYC. H3 resolution 5 (~252km² cells) is used to maximize join hits, but some traffic segments will still produce NULL air quality readings due to genuine absence of nearby sensors. This is documented as a data quality finding.
 
 **Weather join NULLs:** NOAA forecast periods use `startTime` of the forecast hour. Traffic events that fall before the next forecast period start will produce NULLs. The join window can be widened to `±1 hour` to reduce this.
+
+**Real-time weather join latency:** The enriched traffic stream uses a left outer join so traffic rows always flow downstream immediately. To prevent Spark from holding traffic records in memory while waiting for future hourly forecasts, the weather join upper bound is tightened to `+ INTERVAL 1 MINUTE`. That keeps the Iceberg sink current and preserves a strictly real-time Grafana dashboard.
 
 **Single Kafka partition:** All topics use a single partition for local development simplicity. Production scale-out would require multiple partitions and corresponding Spark executor parallelism.
 

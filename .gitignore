@@ -3,3 +3,17 @@ __pycache__/
 *.pyc
 .DS_Store
 .idea/
+# Environments
+.env
+venv/
+.venv/
+
+# Data
+workspace/data/
+*.csv
+*.parquet
+*.json
+
+# Spark / Jupyter
+.ipynb_checkpoints/
+spark-warehouse/
