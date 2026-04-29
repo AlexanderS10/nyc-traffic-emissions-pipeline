@@ -1,15 +1,19 @@
 import requests
 import json
 import time
+import time
+import os
+from dotenv import load_dotenv
 from confluent_kafka import Producer
 
+load_dotenv()
+CONTACT_EMAIL = os.getenv("NOAA_CONTACT_EMAIL", "your_email@example.com")
 KAFKA_BROKER = "redpanda:29092"
 TOPIC_NAME = "nyc_weather_raw"
-POLL_INTERVAL = 1800  # 30 minutes
+POLL_INTERVAL = 3600
 
 HEADERS = {
-    # NOAA requires a User-Agent — use your actual email
-    "User-Agent": "NYCAirQualityProject (your_email@example.com)",
+    "User-Agent": f"NYCAirQualityProject ({CONTACT_EMAIL})",
     "Accept": "application/geo+json"
 }
 

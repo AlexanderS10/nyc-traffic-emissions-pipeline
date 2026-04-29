@@ -9,6 +9,8 @@ from confluent_kafka import Producer
 load_dotenv()
 
 PURPLEAIR_API_KEY = os.getenv("PURPLEAIR_API_KEY")
+if not PURPLEAIR_API_KEY:
+    raise RuntimeError("PURPLEAIR_API_KEY not found in .env — aborting.")
 KAFKA_BROKER = "redpanda:29092"
 TOPIC_NAME   = "nyc_purpleair_raw"
 POLL_INTERVAL = 120  # 2 minutes (PurpleAir updates relatively frequently)
@@ -18,7 +20,7 @@ API_URL = "https://api.purpleair.com/v1/sensors"
 
 # Bounding box roughly covering New York City (NW to SE)
 PARAMS = {
-    "fields": "name,latitude,longitude,pm2.5_10minute,temperature,humidity",
+    "fields": "sensor_index,name,latitude,longitude,pm2.5_10minute,temperature,humidity",
     "nwlng": "-74.2590",
     "nwlat": "40.9176",
     "selng": "-73.7003",
