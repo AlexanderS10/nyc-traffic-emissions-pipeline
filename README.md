@@ -18,12 +18,12 @@ This project builds a highly scalable, real-time distributed data pipeline that 
 ```
 NYC DOT API ──┐
 OpenAQ API  ──┼──► Redpanda (Kafka) ──► PySpark Structured Streaming ──► MinIO (Iceberg) ──► Trino ──► Grafana
-NOAA API    ──┘         Topics                  H3 Spatial Join
+OpenWeatherMap API ──┘    Topics                  H3 Spatial Join
 ```
 
-1. **Ingestion (Redpanda/Kafka):** Python producers continuously poll NYC DOT, OpenAQ, PurpleAir, and NOAA APIs, publishing JSON payloads into dedicated Kafka topics.
+1. **Ingestion (Redpanda/Kafka):** Python producers continuously poll NYC DOT, OpenAQ, PurpleAir, and OpenWeatherMap APIs, publishing JSON payloads into dedicated Kafka topics.
 2. **Stream Processing (PySpark 4.0.2):** Spark Structured Streaming consumes topics, applies event-time watermarking, and assigns H3 hex grid IDs (resolution 5) for spatial indexing.
-3. **Multi-Stream Join:** Traffic nodes and air sensors sharing the same H3 grid cell are joined within a 15-minute sliding window. Weather data joins on a 2-hour window using a broadcast key.
+3. **Multi-Stream Join:** Traffic nodes and air sensors sharing the same H3 grid cell are joined within a 15-minute sliding window. Weather data joins on a 15-minute window using a broadcast key.
 4. **Medallion Storage (MinIO + Apache Iceberg):** The pipeline writes into three distinct buckets: `raw-data` for raw Kafka JSON landed as Parquet, `refined-data` for cleaned and spatially indexed Parquet, and `business-data` for the final ACID-compliant Apache Iceberg table.
 5. **Serving Layer (Trino + Grafana):** Trino queries the Iceberg tables in `business-data`, powering a live Grafana dashboard with borough-level traffic and air quality panels.
 
@@ -51,7 +51,7 @@ NOAA API    ──┘         Topics                  H3 Spatial Join
 - [NYC DOT Real-Time Traffic Speeds](https://data.cityofnewyork.us/Transportation/DOT-Traffic-Speeds-NBE/i4gi-tjb9) — polled every 60s
 - [OpenAQ API v3](https://docs.openaq.org) — PM2.5 sensor readings, polled every 5 min
 - [PurpleAir API](https://develop.purpleair.com) — hyperlocal PM2.5, polled every 2 min
-- [NOAA National Weather Service API](https://www.weather.gov/documentation/services-web-api) — hourly forecast, polled every 30 min
+- [OpenWeatherMap Current Weather API](https://openweathermap.org/current) — weather observations, polled every 5 min
 
 **Static Lookup Datasets:**
 - NYC Truck Route Network Shapefiles
@@ -90,11 +90,13 @@ Add your credentials:
 NYC_DOT_APP_TOKEN=your_token_here
 OPENAQ_API_KEY=your_key_here
 PURPLEAIR_API_KEY=your_key_here
+OPENWEATHER_API_KEY=your_key_here
 ```
 
 - NYC DOT token: [Register here](https://data.cityofnewyork.us/profile/app_tokens) (free, raises rate limits)
 - OpenAQ API key: [Register here](https://explore.openaq.org/register) (free)
 - PurpleAir API key: [Register here](https://develop.purpleair.com) (free tier available)
+- OpenWeatherMap API key: [Register here](https://openweathermap.org/api) (free tier available)
 
 ### 3. Start the Cluster
 
@@ -150,7 +152,7 @@ Or run them individually in separate terminals:
 python traffic_producer.py    # NYC DOT — polls every 60s
 python openaq_producer.py     # OpenAQ  — polls every 5 min
 python purpleair_producer.py  # PurpleAir — polls every 2 min
-python noaa_producer.py       # NOAA    — polls every 30 min
+python noaa_producer.py       # OpenWeatherMap adapter for Spark schema compatibility — polls every 5 min
 ```
 
 ### Step 2: Verify Data Is Flowing Into Redpanda
@@ -350,6 +352,8 @@ Remove `.withWatermark()` from individual stream DataFrames and apply it only on
 **Streaming job ran but table is empty:**
 The watermark window requires all streams to have overlapping event timestamps. With `startingOffsets: earliest`, historical data catches up quickly. Wait for at least one full micro-batch to commit (~30s) before querying.
 
+**Data latency note:** Spark uses stateful watermarking for stream-to-stream joins, so records typically appear in the Iceberg table about 15-20 minutes after ingestion. That delay ensures the traffic, air quality, and weather joins complete with the necessary temporal context.
+
 **Stale checkpoint causing schema mismatch:**
 ```bash
 # Clear all checkpoints and restart from the top
@@ -377,9 +381,9 @@ SHOW TABLES FROM iceberg.db;
 **Trino 403 Forbidden on S3:**
 Ensure `iceberg.properties` in `trino_config/` contains correct MinIO endpoint and credentials and that the file is mounted into the Trino container in `docker-compose.yml`.
 
-### NOAA Weather API 404
+### Weather Source Pivot
 
-The NOAA grid coordinates change over time. Never hardcode `/gridpoints/OKX/X,Y`. The producer dynamically resolves the correct grid via `/points/{lat},{lon}` on startup. If you see 404s, the in-memory cache is stale — restart the producer process.
+We transitioned the weather ingestion path from NOAA to OpenWeatherMap to satisfy the Velocity pillar of Big Data and keep weather observations on the same cadence as the traffic and air quality sensors. The existing `noaa_producer.py` filename is retained for compatibility, but it now functions as an adapter around OpenWeatherMap data.
 
 ---
 
@@ -397,7 +401,7 @@ The NOAA grid coordinates change over time. Never hardcode `/gridpoints/OKX/X,Y`
     ├── traffic_producer.py     # NYC DOT traffic stream
     ├── openaq_producer.py      # OpenAQ air quality stream
     ├── purpleair_producer.py   # PurpleAir hyperlocal PM2.5 stream
-    ├── noaa_producer.py        # NOAA weather stream
+    ├── noaa_producer.py        # OpenWeatherMap adapter for the weather stream
     ├── 01_nyc_environmental_pipeline.ipynb   # Main Spark streaming pipeline
     └── 02_live_data_exploration.ipynb        # Ad-hoc Iceberg queries
 ```
@@ -408,9 +412,9 @@ The NOAA grid coordinates change over time. Never hardcode `/gridpoints/OKX/X,Y`
 
 **Air quality NULLs:** OpenAQ has sparse sensor coverage in NYC. H3 resolution 5 (~252km² cells) is used to maximize join hits, but some traffic segments will still produce NULL air quality readings due to genuine absence of nearby sensors. This is documented as a data quality finding.
 
-**Weather join NULLs:** NOAA forecast periods use `startTime` of the forecast hour. Traffic events that fall before the next forecast period start will produce NULLs. The join window can be widened to `±1 hour` to reduce this.
+**Weather join NULLs:** OpenWeatherMap observations are now joined on a 15-minute window so weather cadence matches the rest of the pipeline. Traffic events that fall outside the overlapping join window can still produce NULLs when the state store has not yet observed the matching weather record.
 
-**Real-time weather join latency:** The enriched traffic stream uses a left outer join so traffic rows always flow downstream immediately. To prevent Spark from holding traffic records in memory while waiting for future hourly forecasts, the weather join upper bound is tightened to `+ INTERVAL 1 MINUTE`. That keeps the Iceberg sink current and preserves a strictly real-time Grafana dashboard.
+**Real-time weather join latency:** The enriched traffic stream uses a left outer join so traffic rows always flow downstream immediately. Because the weather stream is statefully joined with traffic and air quality data, records typically surface in Iceberg about 15-20 minutes after ingestion once Spark has enough watermark progress to confirm join completeness.
 
 **Single Kafka partition:** All topics use a single partition for local development simplicity. Production scale-out would require multiple partitions and corresponding Spark executor parallelism.
 

@@ -1,21 +1,21 @@
 import requests
 import json
 import time
-import time
 import os
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from confluent_kafka import Producer
 
+# Load API keys from the .env file
 load_dotenv()
-CONTACT_EMAIL = os.getenv("NOAA_CONTACT_EMAIL", "your_email@example.com")
+OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
+
+if not OPENWEATHER_API_KEY:
+    raise RuntimeError("OPENWEATHER_API_KEY not found in .env — aborting.")
+
 KAFKA_BROKER = "redpanda:29092"
 TOPIC_NAME = "nyc_weather_raw"
-POLL_INTERVAL = 3600
-
-HEADERS = {
-    "User-Agent": f"NYCAirQualityProject ({CONTACT_EMAIL})",
-    "Accept": "application/geo+json"
-}
+POLL_INTERVAL = 300  # 5 minutes! This gives us near real-time weather ingestion.
 
 # Geographic centroids for each NYC borough
 NYC_BOROUGHS = {
@@ -31,103 +31,73 @@ producer = Producer({
     "client.id": "nyc-weather-producer"
 })
 
-# In-memory cache: borough -> resolved forecastHourly URL
-# Avoids re-calling /points/ on every poll cycle
-_forecast_url_cache: dict[str, str] = {}
-
-
 def delivery_report(err, msg):
     if err is not None:
         print(f"[kafka] Delivery failed for {msg.key()}: {err}")
 
-
-def resolve_forecast_url(borough: str, lat: float, lon: float) -> str | None:
-    """
-    Calls /points/{lat},{lon} to dynamically resolve the correct forecastHourly URL.
-    This is the only correct way to get NOAA grid coordinates — never hardcode them.
-    """
-    if borough in _forecast_url_cache:
-        return _forecast_url_cache[borough]
-
-    url = f"https://api.weather.gov/points/{lat},{lon}"
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=30)
-        resp.raise_for_status()
-        props = resp.json().get("properties", {})
-        forecast_hourly_url = props.get("forecastHourly")
-
-        if not forecast_hourly_url:
-            print(f"[{borough}] ERROR: No forecastHourly in /points/ response.")
-            return None
-
-        grid_id = props.get("gridId")
-        grid_x  = props.get("gridX")
-        grid_y  = props.get("gridY")
-        print(f"[{borough}] Resolved grid: {grid_id}/{grid_x},{grid_y}")
-
-        _forecast_url_cache[borough] = forecast_hourly_url
-        return forecast_hourly_url
-
-    except requests.exceptions.RequestException as e:
-        print(f"[{borough}] Failed to resolve /points/: {e}")
-        return None
-
+def deg_to_compass(num):
+    """Converts wind direction in degrees to a compass direction (NOAA style)."""
+    val = int((num / 22.5) + .5)
+    arr = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+    return arr[(val % 16)]
 
 def fetch_and_send_borough(borough: str, lat: float, lon: float):
-    forecast_url = resolve_forecast_url(borough, lat, lon)
-    if not forecast_url:
-        return
-
+    # Call the OpenWeatherMap Current Weather endpoint
+    url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={OPENWEATHER_API_KEY}&units=imperial"
+    
     try:
-        resp = requests.get(forecast_url, headers=HEADERS, timeout=30)
+        resp = requests.get(url, timeout=30)
         resp.raise_for_status()
-        periods = resp.json().get("properties", {}).get("periods", [])
+        data = resp.json()
 
-        if not periods:
-            print(f"[{borough}] No forecast periods returned.")
-            return
+        # Generate a proper ISO-8601 timestamp for PySpark's to_timestamp() function
+        event_time = datetime.fromtimestamp(data["dt"], timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
-        count = 0
-        for period in periods[:5]:  # next 5 hours is sufficient for a 15-min window join
-            payload = {
-                **period,
-                "borough": borough,
-                "source_lat": lat,
-                "source_lon": lon,
-            }
-            # Composite key keeps same borough on the same Kafka partition
-            kafka_key = f"{borough}::{period.get('startTime', 'unknown')}"
+        # Translate OpenWeatherMap JSON into the exact schema PySpark expects (NOAA format)
+        payload = {
+            "name": borough, 
+            "startTime": event_time,
+            "endTime": event_time, # Current weather, so start and end are the same
+            "isDaytime": True, 
+            "temperature": int(data["main"]["temp"]),
+            "temperatureUnit": "F",
+            "windSpeed": f"{int(data['wind']['speed'])} mph", # Spark regex expects "X mph"
+            "windDirection": deg_to_compass(data.get("wind", {}).get("deg", 0)),
+            "shortForecast": data["weather"][0]["description"],
+            "probabilityOfPrecipitation": {
+                "unitCode": "wmoUnit:percent", 
+                "value": 0  # Defaulting to 0 for current observations
+            },
+            "borough": borough,
+            "source_lat": lat,
+            "source_lon": lon,
+        }
 
-            producer.produce(
-                topic=TOPIC_NAME,
-                key=kafka_key.encode("utf-8"),
-                value=json.dumps(payload).encode("utf-8"),
-                callback=delivery_report,
-            )
-            count += 1
+        kafka_key = f"{borough}::{event_time}"
+
+        producer.produce(
+            topic=TOPIC_NAME,
+            key=kafka_key.encode("utf-8"),
+            value=json.dumps(payload).encode("utf-8"),
+            callback=delivery_report,
+        )
 
         producer.flush()
-        print(f"[{borough}] Pushed {count} hourly forecasts to '{TOPIC_NAME}'.")
+        print(f"[{borough}] Pushed current weather (Temp: {payload['temperature']}F) to '{TOPIC_NAME}'.")
 
     except requests.exceptions.RequestException as e:
         print(f"[{borough}] Forecast fetch error: {e}")
-        # If NOAA rotated the grid cell, bust the cache so we re-resolve next poll
-        if "404" in str(e):
-            _forecast_url_cache.pop(borough, None)
-            print(f"[{borough}] Cache busted — will re-resolve grid on next poll.")
     except Exception as e:
         print(f"[{borough}] Unexpected error: {e}")
 
-
 def fetch_all_boroughs():
-    print("--- Polling NOAA weather for all NYC boroughs ---")
+    print("--- Polling OpenWeatherMap for all NYC boroughs ---")
     for borough, coords in NYC_BOROUGHS.items():
         fetch_and_send_borough(borough, coords["lat"], coords["lon"])
-        time.sleep(1)  # rate-limit courtesy between borough calls
-
+        time.sleep(1)  # Rate-limit courtesy
 
 if __name__ == "__main__":
-    print(f"Starting NYC Weather Producer. Polling every {POLL_INTERVAL}s...")
+    print(f"Starting NYC Weather Producer (OpenWeatherMap). Polling every {POLL_INTERVAL}s...")
     while True:
         fetch_all_boroughs()
         time.sleep(POLL_INTERVAL)
