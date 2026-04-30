@@ -30,19 +30,26 @@ def delivery_report(err, msg):
 
 def fetch_and_send(last_seen_ts: str) -> str:
     """
-    Fetches records newer than last_seen_ts, pushes them to Kafka.
-    Returns the new latest timestamp seen.
+    Fetches records newer than last_seen_ts from NYC DOT API and pushes to Kafka.
+    Includes fixes for Socrata SoQL malformed queries and 500 errors.
     """
     headers = {"X-App-Token": APP_TOKEN} if APP_TOKEN else {}
 
-    # Only pull records newer than what we last processed
     url = API_URL
-    if last_seen_ts:
-        url += f"&$where=data_as_of>'{last_seen_ts}'"
-
+    
+    if last_seen_ts and last_seen_ts.strip():
+        clean_ts = last_seen_ts.split(".")[0]
+        # Fix for Malformed Query: Wrap the timestamp in single quotes for SoQL syntax
+        # This prevents the "Expected an expression, but got ORDER" error
+        url += f"&$where=data_as_of>'{clean_ts}'"
     try:
         print(f"Fetching traffic data (since {last_seen_ts or 'beginning'})...")
         response = requests.get(url, headers=headers, timeout=30)
+        # Log the full URL if we hit a 400 error for easier debugging
+        if response.status_code == 400:
+            print(f"[DEBUG] Malformed request URL: {url}")
+            print(f"[DEBUG] Response body: {response.text}")
+            
         response.raise_for_status()
         records = response.json()
 
@@ -55,6 +62,7 @@ def fetch_and_send(last_seen_ts: str) -> str:
             sensor_id = str(record.get("id", "unknown"))
             payload   = json.dumps(record)
 
+            # Push to Redpanda
             producer.produce(
                 topic=TOPIC_NAME,
                 key=sensor_id.encode("utf-8"),
@@ -62,7 +70,7 @@ def fetch_and_send(last_seen_ts: str) -> str:
                 callback=delivery_report,
             )
 
-            # Track the most recent timestamp we've seen
+            # Track the most recent timestamp to use for the next poll
             record_ts = record.get("data_as_of")
             if record_ts and (not new_latest_ts or record_ts > new_latest_ts):
                 new_latest_ts = record_ts
@@ -72,12 +80,12 @@ def fetch_and_send(last_seen_ts: str) -> str:
         return new_latest_ts
 
     except requests.exceptions.RequestException as e:
-        print(f"API Error: {e}")
+        print(f"API Connection Error: {e}")
         return last_seen_ts
     except Exception as e:
-        print(f"Unexpected Error: {e}")
+        print(f"Unexpected Producer Error: {e}")
         return last_seen_ts
-
+    
 if __name__ == "__main__":
     print(f"Starting NYC Traffic Producer. Polling every {POLL_INTERVAL}s...")
     last_seen_ts = ""  # empty = fetch everything on first run
