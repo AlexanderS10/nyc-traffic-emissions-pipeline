@@ -419,3 +419,11 @@ We transitioned the weather ingestion path from NOAA to OpenWeatherMap to satisf
 **Single Kafka partition:** All topics use a single partition for local development simplicity. Production scale-out would require multiple partitions and corresponding Spark executor parallelism.
 
 **PurpleAir timestamps:** PurpleAir sensors do not return an explicit event timestamp in the bounding box query, so the Kafka ingestion timestamp is used as a proxy for event time. This introduces minor lag in the stream join.
+
+
+NYC Truck Routes
+https://data.cityofnewyork.us/Transportation/New-York-City-Truck-Routes-Map-/wnu3-egq7
+
+https://data.cityofnewyork.us/Environment/Energy-and-Water-Data-Disclosure-for-Local-Law-84-/usc3-8zwd/about_data
+
+https://data.ny.gov/Transportation/MTA-Central-Business-District-Geofence-Beginning-J/srxy-5nxn/about_data

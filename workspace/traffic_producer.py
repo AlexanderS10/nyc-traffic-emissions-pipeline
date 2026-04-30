@@ -8,16 +8,12 @@ from confluent_kafka import Producer
 
 load_dotenv()
 
-APP_TOKEN   = os.getenv("NYC_DOT_APP_TOKEN")
+APP_TOKEN    = os.getenv("NYC_DOT_APP_TOKEN")
 KAFKA_BROKER = "redpanda:29092"
 TOPIC_NAME   = "nyc_traffic_raw"
 POLL_INTERVAL = 60  # seconds
 
-API_URL = (
-    "https://data.cityofnewyork.us/resource/i4gi-tjb9.json"
-    "?$limit=1000"
-    "&$order=data_as_of+DESC"
-)
+BASE_URL = "https://data.cityofnewyork.us/resource/i4gi-tjb9.json"
 
 producer = Producer({
     "bootstrap.servers": KAFKA_BROKER,
@@ -31,25 +27,28 @@ def delivery_report(err, msg):
 def fetch_and_send(last_seen_ts: str) -> str:
     """
     Fetches records newer than last_seen_ts from NYC DOT API and pushes to Kafka.
-    Includes fixes for Socrata SoQL malformed queries and 500 errors.
+    Uses the params dict so requests handles encoding correctly, preventing
+    SoQL malformed query errors caused by pre-built URL strings.
     """
     headers = {"X-App-Token": APP_TOKEN} if APP_TOKEN else {}
 
-    url = API_URL
-    
+    params = {
+        "$limit": 1000,
+        "$order": "data_as_of DESC",
+    }
+
     if last_seen_ts and last_seen_ts.strip():
-        clean_ts = last_seen_ts.split(".")[0]
-        # Fix for Malformed Query: Wrap the timestamp in single quotes for SoQL syntax
-        # This prevents the "Expected an expression, but got ORDER" error
-        url += f"&$where=data_as_of>'{clean_ts}'"
+        clean_ts = last_seen_ts.split(".")[0]  # strip microseconds
+        params["$where"] = f"data_as_of > '{clean_ts}'"
+
     try:
         print(f"Fetching traffic data (since {last_seen_ts or 'beginning'})...")
-        response = requests.get(url, headers=headers, timeout=30)
-        # Log the full URL if we hit a 400 error for easier debugging
+        response = requests.get(BASE_URL, headers=headers, params=params, timeout=30)
+
         if response.status_code == 400:
-            print(f"[DEBUG] Malformed request URL: {url}")
+            print(f"[DEBUG] Malformed request URL: {response.url}")
             print(f"[DEBUG] Response body: {response.text}")
-            
+
         response.raise_for_status()
         records = response.json()
 
@@ -85,11 +84,10 @@ def fetch_and_send(last_seen_ts: str) -> str:
     except Exception as e:
         print(f"Unexpected Producer Error: {e}")
         return last_seen_ts
-    
+
 if __name__ == "__main__":
     print(f"Starting NYC Traffic Producer. Polling every {POLL_INTERVAL}s...")
     last_seen_ts = ""  # empty = fetch everything on first run
     while True:
         last_seen_ts = fetch_and_send(last_seen_ts)
         time.sleep(POLL_INTERVAL)
-# %%
