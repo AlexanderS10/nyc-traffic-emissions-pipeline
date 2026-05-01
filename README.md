@@ -23,7 +23,7 @@ OpenWeatherMap API ──┘    Topics                  H3 Spatial Join
 
 1. **Ingestion (Redpanda/Kafka):** Python producers continuously poll NYC DOT, OpenAQ, PurpleAir, and OpenWeatherMap APIs, publishing JSON payloads into dedicated Kafka topics.
 2. **Stream Processing (PySpark 4.0.2):** Spark Structured Streaming consumes topics, applies event-time watermarking, and assigns H3 hex grid IDs (resolution 5) for spatial indexing.
-3. **Multi-Stream Join:** Traffic nodes and air sensors sharing the same H3 grid cell are joined within a 15-minute sliding window. Weather data joins on a 15-minute window using a broadcast key.
+3. **Multi-Stream Join:** Traffic nodes and air sensors sharing the same H3 grid cell are joined within a 15-minute sliding window. Weather data joins on a 15-minute window using a broadcast key. Apache Sedona also performs spatial joins between real-time traffic points and static polygon layers (truck routes, congestion zones, and building-energy geographies) to isolate confounding variables.
 4. **Medallion Storage (MinIO + Apache Iceberg):** The pipeline writes into three distinct buckets: `raw-data` for raw Kafka JSON landed as Parquet, `refined-data` for cleaned and spatially indexed Parquet, and `business-data` for the final ACID-compliant Apache Iceberg table.
 5. **Serving Layer (Trino + Grafana):** Trino queries the Iceberg tables in `business-data`, powering a live Grafana dashboard with borough-level traffic and air quality panels.
 
@@ -54,9 +54,9 @@ OpenWeatherMap API ──┘    Topics                  H3 Spatial Join
 - [OpenWeatherMap Current Weather API](https://openweathermap.org/current) — weather observations, polled every 5 min
 
 **Static Lookup Datasets:**
-- NYC Truck Route Network Shapefiles
-- MTA Congestion Relief Zones
-- NYC LL84 Building Energy Benchmarking Data
+- [NYC Truck Route Network: NYC Open Data - Truck Routes](https://data.cityofnewyork.us/Transportation/New-York-City-Truck-Routes-Map-/wnu3-egq7) (download as Shapefile)
+- [MTA Congestion Relief Zone (Geofence): MTA Central Business District Geofence](https://data.ny.gov/Transportation/MTA-Central-Business-District-Geofence-Beginning-J/srxy-5nxn/about_data) (download as GeoJSON)
+- [NYC LL84 Building Energy Data: NYC Open Data - Local Law 84](https://data.cityofnewyork.us/Environment/Energy-and-Water-Data-Disclosure-for-Local-Law-84-/usc3-8zwd/about_data) (download as CSV)
 
 ---
 
@@ -110,7 +110,19 @@ This builds the custom PySpark 4.0.2 Jupyter image and starts all services. Firs
 
 The `minio-init` container creates the `raw-data`, `refined-data`, and `business-data` buckets automatically on startup, so no manual MinIO setup is required.
 
-### 5. Verify All Services Are Running
+### 5. Static Data Onboarding (Manual Upload to MinIO)
+
+Upload the static datasets to `s3a://raw-data/static/` using the following subfolder layout:
+
+```text
+s3a://raw-data/static/truck_routes/
+s3a://raw-data/static/congestion_zones/
+s3a://raw-data/static/building_energy/
+```
+
+**Format note:** Use NYC Truck Routes as a Shapefile (`.shp` bundle), MTA Congestion Zones as GeoJSON (`.geojson`), and LL84 building energy data as CSV (`.csv`). The Shapefile and GeoJSON assets are used by Apache Sedona for polygon-based spatial joins.
+
+### 6. Verify All Services Are Running
 
 ```bash
 docker compose ps
@@ -416,14 +428,8 @@ We transitioned the weather ingestion path from NOAA to OpenWeatherMap to satisf
 
 **Real-time weather join latency:** The enriched traffic stream uses a left outer join so traffic rows always flow downstream immediately. Because the weather stream is statefully joined with traffic and air quality data, records typically surface in Iceberg about 15-20 minutes after ingestion once Spark has enough watermark progress to confirm join completeness.
 
+**Confounding variable isolation:** We use Apache Sedona to spatially join live traffic points with static truck-route polygons, congestion-zone boundaries, and LL84 building-energy geographies. This flags when a pollution spike is more likely driven by nearby freight corridors or high-emissions buildings rather than routine passenger-car traffic.
+
 **Single Kafka partition:** All topics use a single partition for local development simplicity. Production scale-out would require multiple partitions and corresponding Spark executor parallelism.
 
 **PurpleAir timestamps:** PurpleAir sensors do not return an explicit event timestamp in the bounding box query, so the Kafka ingestion timestamp is used as a proxy for event time. This introduces minor lag in the stream join.
-
-
-NYC Truck Routes
-https://data.cityofnewyork.us/Transportation/New-York-City-Truck-Routes-Map-/wnu3-egq7
-
-https://data.cityofnewyork.us/Environment/Energy-and-Water-Data-Disclosure-for-Local-Law-84-/usc3-8zwd/about_data
-
-https://data.ny.gov/Transportation/MTA-Central-Business-District-Geofence-Beginning-J/srxy-5nxn/about_data
