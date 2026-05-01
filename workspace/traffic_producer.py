@@ -8,16 +8,12 @@ from confluent_kafka import Producer
 
 load_dotenv()
 
-APP_TOKEN   = os.getenv("NYC_DOT_APP_TOKEN")
+APP_TOKEN    = os.getenv("NYC_DOT_APP_TOKEN")
 KAFKA_BROKER = "redpanda:29092"
 TOPIC_NAME   = "nyc_traffic_raw"
 POLL_INTERVAL = 60  # seconds
 
-API_URL = (
-    "https://data.cityofnewyork.us/resource/i4gi-tjb9.json"
-    "?$limit=1000"
-    "&$order=data_as_of+DESC"
-)
+BASE_URL = "https://data.cityofnewyork.us/resource/i4gi-tjb9.json"
 
 producer = Producer({
     "bootstrap.servers": KAFKA_BROKER,
@@ -30,19 +26,29 @@ def delivery_report(err, msg):
 
 def fetch_and_send(last_seen_ts: str) -> str:
     """
-    Fetches records newer than last_seen_ts, pushes them to Kafka.
-    Returns the new latest timestamp seen.
+    Fetches records newer than last_seen_ts from NYC DOT API and pushes to Kafka.
+    Uses the params dict so requests handles encoding correctly, preventing
+    SoQL malformed query errors caused by pre-built URL strings.
     """
     headers = {"X-App-Token": APP_TOKEN} if APP_TOKEN else {}
 
-    # Only pull records newer than what we last processed
-    url = API_URL
-    if last_seen_ts:
-        url += f"&$where=data_as_of>'{last_seen_ts}'"
+    params = {
+        "$limit": 1000,
+        "$order": "data_as_of DESC",
+    }
+
+    if last_seen_ts and last_seen_ts.strip():
+        clean_ts = last_seen_ts.split(".")[0]  # strip microseconds
+        params["$where"] = f"data_as_of > '{clean_ts}'"
 
     try:
         print(f"Fetching traffic data (since {last_seen_ts or 'beginning'})...")
-        response = requests.get(url, headers=headers, timeout=30)
+        response = requests.get(BASE_URL, headers=headers, params=params, timeout=30)
+
+        if response.status_code == 400:
+            print(f"[DEBUG] Malformed request URL: {response.url}")
+            print(f"[DEBUG] Response body: {response.text}")
+
         response.raise_for_status()
         records = response.json()
 
@@ -55,6 +61,7 @@ def fetch_and_send(last_seen_ts: str) -> str:
             sensor_id = str(record.get("id", "unknown"))
             payload   = json.dumps(record)
 
+            # Push to Redpanda
             producer.produce(
                 topic=TOPIC_NAME,
                 key=sensor_id.encode("utf-8"),
@@ -62,7 +69,7 @@ def fetch_and_send(last_seen_ts: str) -> str:
                 callback=delivery_report,
             )
 
-            # Track the most recent timestamp we've seen
+            # Track the most recent timestamp to use for the next poll
             record_ts = record.get("data_as_of")
             if record_ts and (not new_latest_ts or record_ts > new_latest_ts):
                 new_latest_ts = record_ts
@@ -72,10 +79,10 @@ def fetch_and_send(last_seen_ts: str) -> str:
         return new_latest_ts
 
     except requests.exceptions.RequestException as e:
-        print(f"API Error: {e}")
+        print(f"API Connection Error: {e}")
         return last_seen_ts
     except Exception as e:
-        print(f"Unexpected Error: {e}")
+        print(f"Unexpected Producer Error: {e}")
         return last_seen_ts
 
 if __name__ == "__main__":
@@ -84,4 +91,3 @@ if __name__ == "__main__":
     while True:
         last_seen_ts = fetch_and_send(last_seen_ts)
         time.sleep(POLL_INTERVAL)
-# %%
