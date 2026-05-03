@@ -1,15 +1,11 @@
 import requests
 import json
 import time
-import os
-from dotenv import load_dotenv
-from confluent_kafka import Producer
+from datetime import datetime, timezone
+from producer_common import TOPICS, create_producer, get_json_with_retry, get_logger, get_required_env, log_startup
 
-load_dotenv()
-
-OPENAQ_API_KEY = os.getenv("OPENAQ_API_KEY")
-KAFKA_BROKER   = "redpanda:29092"
-TOPIC_NAME     = "nyc_openaq_raw"
+OPENAQ_API_KEY = get_required_env("OPENAQ_API_KEY")
+TOPIC_NAME = TOPICS["openaq"]
 POLL_INTERVAL  = 300  # 5 minutes
 
 LOCATIONS_URL    = "https://api.openaq.org/v3/locations"
@@ -22,22 +18,37 @@ LOCATION_PARAMS = {
     "limit": 50,
 }
 
-producer = Producer({
-    "bootstrap.servers": KAFKA_BROKER,
-    "client.id": "nyc-openaq-producer"
-})
+logger = get_logger("openaq_producer")
+producer = create_producer("nyc-openaq-producer")
+
+
+def to_iso_utc(ts_value: str | None) -> str | None:
+    if not ts_value:
+        return None
+    try:
+        if ts_value.endswith("Z"):
+            return ts_value
+        dt = datetime.fromisoformat(ts_value.replace("Z", "+00:00"))
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return None
+
+
+def to_float(value) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
 
 
 def delivery_report(err, msg):
     if err is not None:
-        print(f"[kafka] Delivery failed for {msg.key()}: {err}")
+        logger.error("kafka_delivery_failed key=%s error=%s", msg.key(), err)
 
 
 def fetch_and_send():
-    if not OPENAQ_API_KEY:
-        print("ERROR: OPENAQ_API_KEY not found in .env")
-        return
-
     headers = {
         "X-API-Key": OPENAQ_API_KEY,
         "Accept":    "application/json"
@@ -45,20 +56,24 @@ def fetch_and_send():
 
     # ── Step 1: Discover NYC sensor locations ─────────────────────────────────
     try:
-        print("Fetching OpenAQ locations for NYC...")
-        loc_resp = requests.get(LOCATIONS_URL, headers=headers,
-                                params=LOCATION_PARAMS, timeout=30)
-        loc_resp.raise_for_status()
-        locations = loc_resp.json().get("results", [])
+        logger.info("fetch_openaq_locations")
+        location_payload = get_json_with_retry(
+            logger,
+            LOCATIONS_URL,
+            headers=headers,
+            params=LOCATION_PARAMS,
+        )
+        locations = location_payload.get("results", [])
     except requests.exceptions.RequestException as e:
-        print(f"Locations fetch error: {e}")
+        logger.error("locations_fetch_error error=%s", e)
         return
 
     if not locations:
-        print("No locations returned.")
+        logger.info("no_locations_returned")
         return
 
     pushed = 0
+    skipped = 0
 
     # ── Step 2: For each location pull its latest PM2.5 reading ───────────────
     for location in locations:
@@ -83,39 +98,62 @@ def fetch_and_send():
                 continue
 
             try:
-                meas_resp = requests.get(
+                measurements_payload = get_json_with_retry(
+                    logger,
                     MEASUREMENTS_URL.format(sensor_id=sensor_id),
                     headers=headers,
-                    params={"limit": 1},  # only the most recent reading
-                    timeout=30
+                    params={"limit": 1},
                 )
-                meas_resp.raise_for_status()
-                readings = meas_resp.json().get("results", [])
+                readings = measurements_payload.get("results", [])
             except requests.exceptions.RequestException as e:
-                print(f"  Sensor {sensor_id} error: {e}")
+                logger.warning("sensor_measurement_fetch_error sensor_id=%s error=%s", sensor_id, e)
                 continue
 
             if not readings:
                 continue
 
             reading = readings[0]
+            pm25 = to_float(reading.get("value"))
+            lat = to_float(coordinates.get("latitude"))
+            lon = to_float(coordinates.get("longitude"))
+            timestamp = to_iso_utc(reading.get("period", {}).get("datetimeTo", {}).get("utc"))
 
-            # Build a flat, schema-friendly payload for Spark
+            # Enforce normalized AQ contract required by Milestone 3.
+            if pm25 is None or lat is None or lon is None or not timestamp:
+                skipped += 1
+                logger.warning(
+                    "skip_invalid_normalized_record source=openaq sensor_id=%s lat=%s lon=%s pm25=%s timestamp=%s",
+                    sensor_id,
+                    lat,
+                    lon,
+                    pm25,
+                    timestamp,
+                )
+                continue
+
+            # Normalized contract fields:
+            # { sensor_id, source, lat, lon, pm25, timestamp }
+            # Keep legacy compatibility fields for existing notebook schema.
             payload = {
-                "sensor_id":     sensor_id,
+                "sensor_id":     str(sensor_id),
+                "source":        "openaq",
+                "lat":           lat,
+                "lon":           lon,
+                "pm25":          pm25,
+                "timestamp":     timestamp,
                 "location_id":   location_id,
                 "location_name": location_name,
-                "latitude":      coordinates.get("latitude"),
-                "longitude":     coordinates.get("longitude"),
+                "latitude":      lat,
+                "longitude":     lon,
                 "parameter":     param_name,
-                "value":         reading.get("value"),          # the PM2.5 μg/m³ reading
+                "value":         pm25,
                 "unit":          reading.get("parameter", {}).get("units"),
-                "datetime_utc":  reading.get("period", {}).get("datetimeTo", {}).get("utc"),
+                "datetime_utc":  timestamp,
             }
 
             producer.produce(
                 topic=TOPIC_NAME,
-                key=str(sensor_id).encode("utf-8"),
+                key=f"openaq::{sensor_id}".encode("utf-8"),
                 value=json.dumps(payload).encode("utf-8"),
                 callback=delivery_report,
             )
@@ -125,11 +163,11 @@ def fetch_and_send():
         time.sleep(0.2)
 
     producer.flush()
-    print(f"Pushed {pushed} PM2.5 readings to '{TOPIC_NAME}'.")
+    logger.info("kafka_batch_sent topic=%s records=%s skipped=%s", TOPIC_NAME, pushed, skipped)
 
 
 if __name__ == "__main__":
-    print(f"Starting NYC OpenAQ Producer. Polling every {POLL_INTERVAL}s...")
+    log_startup(logger, "nyc-openaq-producer", TOPIC_NAME, POLL_INTERVAL)
     while True:
         fetch_and_send()
         time.sleep(POLL_INTERVAL)

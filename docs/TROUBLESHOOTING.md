@@ -32,7 +32,8 @@ docker exec -it redpanda rpk topic create nyc_traffic_raw
 
 ```bash
 # Set up the mc alias (required once per terminal session)
-docker exec -it minio mc alias set myminio http://localhost:9000 admin password
+# Use MinIO root credentials from your repo `.env`.
+docker exec -it minio mc alias set myminio http://localhost:9000 <MINIO_ROOT_USER> <MINIO_ROOT_PASSWORD>
 
 # Browse the medallion buckets
 docker exec -it minio mc ls myminio/raw-data/
@@ -48,6 +49,19 @@ docker exec -it minio mc rm -r --force myminio/business-data/checkpoints/
 docker exec -it minio mc du myminio/raw-data
 docker exec -it minio mc du myminio/refined-data
 docker exec -it minio mc du myminio/business-data
+```
+
+**Static data onboarding utility**
+
+```bash
+# Run automated static onboarding (download + MinIO upload)
+docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/initialize_static_data.py
+
+# If rerunning and you need to overwrite existing objects:
+docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/initialize_static_data.py --overwrite
+
+# Verify expected prefixes are populated
+docker exec -it minio mc ls --recursive myminio/raw-data/static/
 ```
 
 ## Spark Streaming Issues
@@ -89,6 +103,7 @@ docker exec -it minio mc rm -r --force myminio/business-data/checkpoints/
 ```bash
 # Test that the REST catalog is reachable
 curl http://localhost:8181/v1/namespaces
+curl http://localhost:8181/v1/config
 
 # Connect to Trino CLI
 docker exec -it trino trino
