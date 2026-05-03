@@ -17,6 +17,22 @@ services:
       - "29092:29092"
     volumes:
       - redpanda_data:/var/lib/redpanda/data
+    networks:
+      - traffic_poll_net
+
+  redpanda-console:
+    image: redpandadata/console:v2.8.0
+    container_name: redpanda-console
+    environment:
+      - KAFKA_BROKERS=redpanda:29092
+      - REDPANDA_ADMINAPI_ENABLED=true
+      - REDPANDA_ADMINAPI_URLS=http://redpanda:9644
+    ports:
+      - "8080:8080"
+    depends_on:
+      - redpanda
+    networks:
+      - traffic_poll_net
 
   spark-master:
     build: .
@@ -27,12 +43,14 @@ services:
       - SPARK_LOCAL_DIRS=/tmp/spark-local
       - PYSPARK_PYTHON=/opt/conda/bin/python
       - PYSPARK_DRIVER_PYTHON=/opt/conda/bin/python
-      - AWS_ACCESS_KEY_ID=admin
-      - AWS_SECRET_ACCESS_KEY=password
-      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=${MINIO_APP_ACCESS_KEY:-admin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_APP_SECRET_KEY:-password}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
     ports:
-      - "8080:8080"
+      - "8082:8080"
       - "7077:7077"
+    networks:
+      - traffic_poll_net
 
   spark-worker:
     build: .
@@ -45,39 +63,52 @@ services:
       - SPARK_LOCAL_DIRS=/tmp/spark-local
       - PYSPARK_PYTHON=/opt/conda/bin/python
       - PYSPARK_DRIVER_PYTHON=/opt/conda/bin/python
-      - AWS_ACCESS_KEY_ID=admin
-      - AWS_SECRET_ACCESS_KEY=password
-      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=${MINIO_APP_ACCESS_KEY:-admin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_APP_SECRET_KEY:-password}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
     depends_on:
       - spark-master
+    networks:
+      - traffic_poll_net
 
   minio:
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: minio
     command: server /data --console-address ":9001"
     environment:
-      - MINIO_ROOT_USER=admin
-      - MINIO_ROOT_PASSWORD=password
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-password}
     ports:
       - "9000:9000"
       - "9001:9001"
     volumes:
       - minio_data:/data
+    networks:
+      - traffic_poll_net
 
   minio-init:
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: minio-init
     depends_on:
       - minio
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-password}
+      - MINIO_APP_ACCESS_KEY=${MINIO_APP_ACCESS_KEY:-admin}
+      - MINIO_APP_SECRET_KEY=${MINIO_APP_SECRET_KEY:-password}
     entrypoint: >
       /bin/sh -c "
-      until mc alias set myminio http://minio:9000 admin password; do echo 'Waiting for MinIO...'; sleep 2; done;
+      until mc alias set myminio http://minio:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD; do echo 'Waiting for MinIO...'; sleep 2; done;
       mc mb --ignore-existing myminio/raw-data;
       mc mb --ignore-existing myminio/refined-data;
       mc mb --ignore-existing myminio/business-data;
+      mc admin user add myminio $MINIO_APP_ACCESS_KEY $MINIO_APP_SECRET_KEY || true;
+      mc admin policy attach myminio readwrite --user $MINIO_APP_ACCESS_KEY || true;
       echo 'MinIO buckets successfully created!';
       exit 0;
       "
+    networks:
+      - traffic_poll_net
 
   rest-catalog:
     image: apache/iceberg-rest-fixture
@@ -89,17 +120,21 @@ services:
       - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
       - CATALOG_S3_ENDPOINT=http://minio:9000
       - CATALOG_S3_PATH__STYLE__ACCESS=true      
-      - AWS_ACCESS_KEY_ID=admin                  
-      - AWS_SECRET_ACCESS_KEY=password          
-      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=${MINIO_APP_ACCESS_KEY:-admin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_APP_SECRET_KEY:-password}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
     depends_on:
       - minio                                  
+    networks:
+      - traffic_poll_net
 
   trino:
     image: trinodb/trino:480
     container_name: trino
     environment:
       - JAVA_TOOL_OPTIONS="-Xmx2G"
+      - MINIO_APP_ACCESS_KEY=${MINIO_APP_ACCESS_KEY:-admin}
+      - MINIO_APP_SECRET_KEY=${MINIO_APP_SECRET_KEY:-password}
     ports:
       - "8081:8080"
     volumes:
@@ -107,6 +142,8 @@ services:
     depends_on:
       - rest-catalog
       - minio
+    networks:
+      - traffic_poll_net
 
   grafana:
     image: grafana/grafana:11.4.0
@@ -119,6 +156,8 @@ services:
       - trino
     volumes:
       - grafana_data:/var/lib/grafana
+    networks:
+      - traffic_poll_net
 
   jupyter:
     build: .
@@ -132,16 +171,22 @@ services:
       - SPARK_LOCAL_DIRS=/tmp/spark-local
       - PYSPARK_PYTHON=/opt/conda/bin/python
       - PYSPARK_DRIVER_PYTHON=/opt/conda/bin/python
-      - AWS_ACCESS_KEY_ID=admin
-      - AWS_SECRET_ACCESS_KEY=password
-      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=${MINIO_APP_ACCESS_KEY:-admin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_APP_SECRET_KEY:-password}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
     volumes:
       - ./workspace:/home/jovyan/work
     depends_on:
       - spark-master
       - rest-catalog
+    networks:
+      - traffic_poll_net
 
 volumes:
   redpanda_data:
   minio_data:
   grafana_data:
+
+networks:
+  traffic_poll_net:
+    driver: bridge

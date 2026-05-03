@@ -50,6 +50,7 @@ OpenWeatherMap API ──┘    Topics                  H3 Spatial Join
 - [MTA Congestion Relief Zone (Geofence): MTA Central Business District Geofence](https://data.ny.gov/Transportation/MTA-Central-Business-District-Geofence-Beginning-J/srxy-5nxn/about_data) (download as GeoJSON)
 - [NYC LL84 Building Energy Data: NYC Open Data - Local Law 84](https://data.cityofnewyork.us/Environment/Energy-and-Water-Data-Disclosure-for-Local-Law-84-/usc3-8zwd/about_data) (download as CSV)
 
+
 ## Prerequisites
 
 - Docker Desktop with at least 8GB RAM allocated (16GB recommended)
@@ -64,15 +65,19 @@ git clone git@github.com:AlexanderS10/nyc-traffic-emissions-pipeline.git
 cd nyc-traffic-emissions-pipeline
 ```
 
-### 2. Configure API Keys
+### 2. Configure Environment Variables
 
-Create a `.env` file inside the `workspace/` directory:
+Create both environment files from templates:
 
 ```bash
-touch workspace/.env
+cp .env.example .env
+cp workspace/.env.example workspace/.env
 ```
 
-Add your credentials:
+- `.env` is used by Docker Compose for infrastructure credentials (MinIO root/app keys and AWS region).
+- `workspace/.env` is used by the data producers for API tokens.
+
+Add your API credentials to `workspace/.env`:
 
 ```env
 NYC_DOT_APP_TOKEN=your_token_here
@@ -94,13 +99,14 @@ docker compose up -d --build
 
 This builds the custom PySpark 4.0.2 Jupyter image and starts all services. The first build takes about 5–10 minutes.
 
-### 4. MinIO Buckets
+### 4. MinIO Buckets and App Credentials
 
-The `minio-init` container creates the `raw-data`, `refined-data`, and `business-data` buckets automatically on startup, so no manual MinIO setup is required.
+The `minio-init` container creates the `raw-data`, `refined-data`, and `business-data` buckets automatically on startup.
+It also provisions the application-scoped MinIO user (`MINIO_APP_ACCESS_KEY` / `MINIO_APP_SECRET_KEY`) defined in `.env`, which is used by Spark, Trino, and Iceberg REST.
 
 ### 5. Static Data Onboarding (Manual Upload to MinIO)
 
-Upload the static datasets to `s3a://raw-data/static/` using the following subfolder layout:
+Upload the static datasets to `s3a://raw-data/static/` from the MinIO Console at `http://localhost:9001` using your `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` values from `.env`.
 
 ```text
 s3a://raw-data/static/truck_routes/
@@ -109,6 +115,17 @@ s3a://raw-data/static/building_energy/
 ```
 
 Use NYC Truck Routes as a Shapefile (`.shp` bundle), MTA Congestion Zones as GeoJSON (`.geojson`), and LL84 building energy data as CSV (`.csv`). The Shapefile and GeoJSON assets are used by Apache Sedona for polygon-based spatial joins.
+
+Or run the following CLI commands (replace placeholders with your `.env` values):
+
+```
+docker exec -it minio mc alias set myminio http://localhost:9000 <MINIO_ROOT_USER> <MINIO_ROOT_PASSWORD>
+docker cp "workspace/static/." minio:/tmp/static
+docker exec -it minio mc cp --recursive /tmp/static/truck_routes myminio/raw-data/static/
+docker exec -it minio mc cp --recursive /tmp/static/congestion_zones myminio/raw-data/static/
+docker exec -it minio mc cp --recursive /tmp/static/building_energy myminio/raw-data/static/
+docker exec -it minio mc ls --recursive myminio/raw-data/static/
+```
 
 ### 6. Verify All Services Are Running
 
@@ -121,12 +138,27 @@ All containers should show `running`. Expected services:
 | Service | URL | Credentials |
 |---|---|---|
 | Jupyter Lab | http://localhost:8888?token=bigdata | token: `bigdata` |
-| Spark Master UI | http://localhost:8080 | — |
-| MinIO Console | http://localhost:9001 | admin / password |
+| Redpanda Console | http://localhost:8080 | — |
+| Spark Master UI | http://localhost:8082 | — |
+| MinIO Console | http://localhost:9001 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` |
 | Grafana | http://localhost:3000 | admin / admin |
 | Trino UI | http://localhost:8081 | — |
 | Redpanda | localhost:9092 | — |
 | Iceberg REST Catalog | http://localhost:8181 | — |
+
+### 7. (Optional) Local Python Virtual Environment
+
+If you want to run utility scripts from your host machine:
+
+```bash
+python -m venv .venv
+# Windows PowerShell:
+.venv\Scripts\Activate.ps1
+# macOS/Linux:
+source .venv/bin/activate
+pip install -r requirements.txt
+python workspace/scripts/check_imports.py
+```
 
 ## Running the Pipeline
 
