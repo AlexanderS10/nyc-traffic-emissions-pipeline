@@ -104,7 +104,28 @@ This builds the custom PySpark 4.0.2 Jupyter image and starts all services. The 
 The `minio-init` container creates the `raw-data`, `refined-data`, and `business-data` buckets automatically on startup.
 It also provisions the application-scoped MinIO user (`MINIO_APP_ACCESS_KEY` / `MINIO_APP_SECRET_KEY`) defined in `.env`, which is used by Spark, Trino, and Iceberg REST.
 
-### 5. Static Data Onboarding (Manual Upload to MinIO)
+### 5. Static Data Onboarding
+
+Preferred (automated): run the one-shot onboarding utility inside Jupyter:
+
+```bash
+docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/initialize_static_data.py
+```
+
+The script downloads:
+- NYC Truck Routes (Shapefile bundle)
+- MTA Congestion Zones (GeoJSON)
+- LL84 Building Energy (CSV)
+
+and uploads them to:
+
+```text
+s3a://raw-data/static/truck_routes/
+s3a://raw-data/static/congestion_zones/
+s3a://raw-data/static/building_energy/
+```
+
+Manual fallback:
 
 Upload the static datasets to `s3a://raw-data/static/` from the MinIO Console at `http://localhost:9001` using your `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` values from `.env`.
 

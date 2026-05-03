@@ -1,28 +1,22 @@
-import requests
 import json
 import time
-import os
 from datetime import datetime, timezone
-from dotenv import load_dotenv
-from confluent_kafka import Producer
+import requests
 
-load_dotenv()
+from producer_common import TOPICS, create_producer, get_logger, get_required_env, get_json_with_retry, log_startup
 
-APP_TOKEN    = os.getenv("NYC_DOT_APP_TOKEN")
-KAFKA_BROKER = "redpanda:29092"
-TOPIC_NAME   = "nyc_traffic_raw"
+APP_TOKEN = get_required_env("NYC_DOT_APP_TOKEN")
+TOPIC_NAME = TOPICS["traffic"]
 POLL_INTERVAL = 60  # seconds
 
 BASE_URL = "https://data.cityofnewyork.us/resource/i4gi-tjb9.json"
 
-producer = Producer({
-    "bootstrap.servers": KAFKA_BROKER,
-    "client.id": "nyc-traffic-producer"
-})
+logger = get_logger("traffic_producer")
+producer = create_producer("nyc-traffic-producer")
 
 def delivery_report(err, msg):
     if err is not None:
-        print(f"Delivery failed for key {msg.key()}: {err}")
+        logger.error("kafka_delivery_failed key=%s error=%s", msg.key(), err)
 
 def fetch_and_send(last_seen_ts: str) -> str:
     """
@@ -42,29 +36,27 @@ def fetch_and_send(last_seen_ts: str) -> str:
         params["$where"] = f"data_as_of > '{clean_ts}'"
 
     try:
-        print(f"Fetching traffic data (since {last_seen_ts or 'beginning'})...")
-        response = requests.get(BASE_URL, headers=headers, params=params, timeout=30)
-
-        if response.status_code == 400:
-            print(f"[DEBUG] Malformed request URL: {response.url}")
-            print(f"[DEBUG] Response body: {response.text}")
-
-        response.raise_for_status()
-        records = response.json()
+        logger.info("fetch_traffic since=%s", last_seen_ts or "beginning")
+        records = get_json_with_retry(
+            logger,
+            BASE_URL,
+            headers=headers,
+            params=params,
+        )
 
         if not records:
-            print("No new records since last poll.")
+            logger.info("no_new_records")
             return last_seen_ts
 
         new_latest_ts = last_seen_ts
+        fetch_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         for record in records:
-            sensor_id = str(record.get("id", "unknown"))
             payload   = json.dumps(record)
 
             # Push to Redpanda
             producer.produce(
                 topic=TOPIC_NAME,
-                key=sensor_id.encode("utf-8"),
+                key=fetch_ts.encode("utf-8"),
                 value=payload.encode("utf-8"),
                 callback=delivery_report,
             )
@@ -75,18 +67,18 @@ def fetch_and_send(last_seen_ts: str) -> str:
                 new_latest_ts = record_ts
 
         producer.flush()
-        print(f"Pushed {len(records)} new records to '{TOPIC_NAME}'.")
+        logger.info("kafka_batch_sent topic=%s records=%s", TOPIC_NAME, len(records))
         return new_latest_ts
 
     except requests.exceptions.RequestException as e:
-        print(f"API Connection Error: {e}")
+        logger.error("api_connection_error error=%s", e)
         return last_seen_ts
     except Exception as e:
-        print(f"Unexpected Producer Error: {e}")
+        logger.error("unexpected_producer_error error=%s", e)
         return last_seen_ts
 
 if __name__ == "__main__":
-    print(f"Starting NYC Traffic Producer. Polling every {POLL_INTERVAL}s...")
+    log_startup(logger, "nyc-traffic-producer", TOPIC_NAME, POLL_INTERVAL)
     last_seen_ts = ""  # empty = fetch everything on first run
     while True:
         last_seen_ts = fetch_and_send(last_seen_ts)

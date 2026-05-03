@@ -1,20 +1,11 @@
 import requests
 import json
 import time
-import os
 from datetime import datetime, timezone
-from dotenv import load_dotenv
-from confluent_kafka import Producer
+from producer_common import TOPICS, create_producer, get_logger, get_required_env, get_json_with_retry, log_startup
 
-# Load API keys from the .env file
-load_dotenv()
-OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
-
-if not OPENWEATHER_API_KEY:
-    raise RuntimeError("OPENWEATHER_API_KEY not found in .env — aborting.")
-
-KAFKA_BROKER = "redpanda:29092"
-TOPIC_NAME = "nyc_weather_raw"
+OPENWEATHER_API_KEY = get_required_env("OPENWEATHER_API_KEY")
+TOPIC_NAME = TOPICS["weather"]
 POLL_INTERVAL = 300  # 5 minutes! This gives us near real-time weather ingestion.
 
 # Geographic centroids for each NYC borough
@@ -26,14 +17,12 @@ NYC_BOROUGHS = {
     "staten_island": {"lat": 40.5795, "lon": -74.1502},
 }
 
-producer = Producer({
-    "bootstrap.servers": KAFKA_BROKER,
-    "client.id": "nyc-weather-producer"
-})
+logger = get_logger("weather_producer")
+producer = create_producer("nyc-weather-producer")
 
 def delivery_report(err, msg):
     if err is not None:
-        print(f"[kafka] Delivery failed for {msg.key()}: {err}")
+        logger.error("kafka_delivery_failed key=%s error=%s", msg.key(), err)
 
 def deg_to_compass(num):
     """Converts wind direction in degrees to a compass direction (NOAA style)."""
@@ -46,9 +35,7 @@ def fetch_and_send_borough(borough: str, lat: float, lon: float):
     url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={OPENWEATHER_API_KEY}&units=imperial"
     
     try:
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
+        data = get_json_with_retry(logger, url)
 
         # Generate a proper ISO-8601 timestamp for PySpark's to_timestamp() function
         event_time = datetime.fromtimestamp(data["dt"], timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -83,21 +70,26 @@ def fetch_and_send_borough(borough: str, lat: float, lon: float):
         )
 
         producer.flush()
-        print(f"[{borough}] Pushed current weather (Temp: {payload['temperature']}F) to '{TOPIC_NAME}'.")
+        logger.info(
+            "kafka_weather_sent topic=%s borough=%s temperature_f=%s",
+            TOPIC_NAME,
+            borough,
+            payload["temperature"],
+        )
 
     except requests.exceptions.RequestException as e:
-        print(f"[{borough}] Forecast fetch error: {e}")
+        logger.error("forecast_fetch_error borough=%s error=%s", borough, e)
     except Exception as e:
-        print(f"[{borough}] Unexpected error: {e}")
+        logger.error("unexpected_error borough=%s error=%s", borough, e)
 
 def fetch_all_boroughs():
-    print("--- Polling OpenWeatherMap for all NYC boroughs ---")
+    logger.info("fetch_weather_all_boroughs")
     for borough, coords in NYC_BOROUGHS.items():
         fetch_and_send_borough(borough, coords["lat"], coords["lon"])
         time.sleep(1)  # Rate-limit courtesy
 
 if __name__ == "__main__":
-    print(f"Starting NYC Weather Producer (OpenWeatherMap). Polling every {POLL_INTERVAL}s...")
+    log_startup(logger, "nyc-weather-producer", TOPIC_NAME, POLL_INTERVAL)
     while True:
         fetch_all_boroughs()
         time.sleep(POLL_INTERVAL)

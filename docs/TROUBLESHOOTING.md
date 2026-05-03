@@ -51,6 +51,19 @@ docker exec -it minio mc du myminio/refined-data
 docker exec -it minio mc du myminio/business-data
 ```
 
+**Static data onboarding utility**
+
+```bash
+# Run automated static onboarding (download + MinIO upload)
+docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/initialize_static_data.py
+
+# If rerunning and you need to overwrite existing objects:
+docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/initialize_static_data.py --overwrite
+
+# Verify expected prefixes are populated
+docker exec -it minio mc ls --recursive myminio/raw-data/static/
+```
+
 ## Spark Streaming Issues
 
 **StreamingQueryException - AWS region/credentials error:**
