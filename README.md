@@ -109,7 +109,7 @@ It also provisions the application-scoped MinIO user (`MINIO_APP_ACCESS_KEY` / `
 Preferred (automated): run the one-shot onboarding utility inside Jupyter:
 
 ```bash
-docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/initialize_static_data.py
+docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/E2_initialize_static_data.py
 ```
 
 The script downloads:
@@ -178,7 +178,7 @@ python -m venv .venv
 # macOS/Linux:
 source .venv/bin/activate
 pip install -r requirements.txt
-python workspace/scripts/check_imports.py
+python workspace/scripts/E1_check_imports.py
 ```
 
 ## Running the Pipeline
