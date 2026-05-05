@@ -55,10 +55,10 @@ docker exec -it minio mc du myminio/business-data
 
 ```bash
 # Run automated static onboarding (download + MinIO upload)
-docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/initialize_static_data.py
+docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/E2_initialize_static_data.py
 
 # If rerunning and you need to overwrite existing objects:
-docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/initialize_static_data.py --overwrite
+docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/E2_initialize_static_data.py --overwrite
 
 # Verify expected prefixes are populated
 docker exec -it minio mc ls --recursive myminio/raw-data/static/
@@ -87,16 +87,101 @@ The watermark window requires all streams to have overlapping event timestamps. 
 
 Spark uses stateful watermarking for stream-to-stream joins, so records typically appear in the Iceberg table about 15-20 minutes after ingestion. That delay ensures the traffic, air quality, and weather joins complete with the necessary temporal context.
 
+**Epic 3 — Milestone 3: late-event watermark verification**
+
+```bash
+# 1) Inject a deliberately late traffic event (older than watermark)
+docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/E3_m3_inject_late_traffic_payload.py --minutes-late 90 --record-id late-probe-001
+
+# 2) Verify raw present + enriched absent + watermark snapshot proxy
+docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/E3_m3_watermark_verification.py --record-id late-probe-001
+```
+
+Expected:
+- Raw check finds `late-probe-001`
+- Enriched check returns zero rows for `traffic_id = late-probe-001`
+- Snapshot prints recent event-time ranges / freshness metrics
+
+**Epic 3 — Milestone 4: data-quality verification**
+
+```bash
+# Verifies invalid-speed / invalid-PM2.5 / out-of-bounds / null-critical counts
+# before and after filters, plus clean sample rows.
+docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/E3_m4_data_quality_verification.py
+```
+
+**Epic 3 — Milestone 5: H3 verification**
+
+```bash
+# Verifies H3 format/validity/resolution and nearby-point same/neighbor behavior
+docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/E3_m5_h3_verification.py
+```
+
+**Epic 3 — Milestone 6: H3 vs geometry benchmark**
+
+```bash
+# Runs sampled benchmark and writes report template at:
+# workspace/benchmarks/E3_m6_h3_vs_geometry_report.md
+docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/E3_m6_h3_vs_geometry_benchmark.py
+```
+
+Tip: after running, open Spark UI SQL tab and fill the report's TODO fields for
+task/shuffle metrics on both benchmark queries.
+
 **Stale checkpoint causing schema mismatch:**
 
 ```bash
-# Clear all checkpoints and restart from the top
+# Option A (targeted): clear only the business stream checkpoint when
+# local.db.enriched_traffic schema/state changes (current version shown)
+docker exec -it minio mc rm -r --force myminio/business-data/checkpoints/local.db.enriched_traffic_v3/
+
+# Option B (full reset): clear all checkpoints and restart from the top
 docker exec -it minio mc rm -r --force myminio/raw-data/checkpoints/
 docker exec -it minio mc rm -r --force myminio/refined-data/checkpoints/
 docker exec -it minio mc rm -r --force myminio/business-data/checkpoints/
 
 # Then restart the Jupyter kernel and re-run all cells
 ```
+
+Note: deleting checkpoints causes replay from source offsets. If needed, also clean affected sink/table outputs to avoid duplicate downstream records.
+
+**Full data reset (checkpoints + sinks + table):**
+
+Use this when you want a truly clean replay after schema/checkpoint changes.
+
+```bash
+# 0) Stop streaming queries / notebook kernel first.
+
+# 1) Clear all streaming checkpoints
+docker exec -it minio mc rm -r --force myminio/raw-data/checkpoints/
+docker exec -it minio mc rm -r --force myminio/refined-data/checkpoints/
+docker exec -it minio mc rm -r --force myminio/business-data/checkpoints/
+
+# 2) Clear raw sink outputs
+docker exec -it minio mc rm -r --force myminio/raw-data/traffic/
+docker exec -it minio mc rm -r --force myminio/raw-data/weather/
+docker exec -it minio mc rm -r --force myminio/raw-data/openaq/
+docker exec -it minio mc rm -r --force myminio/raw-data/purpleair/
+docker exec -it minio mc rm -r --force myminio/raw-data/quarantine/
+
+# 3) Clear refined sink outputs
+docker exec -it minio mc rm -r --force myminio/refined-data/traffic/
+docker exec -it minio mc rm -r --force myminio/refined-data/air_quality/
+```
+
+Then, in Spark (not shell), drop and recreate the Iceberg table via pipeline startup:
+
+```python
+spark.sql("DROP TABLE IF EXISTS local.db.enriched_traffic")
+```
+
+Optionally clean residual business table files if any remain:
+
+```bash
+docker exec -it minio mc rm -r --force myminio/business-data/db/enriched_traffic/
+```
+
+Finally restart producers and rerun `workspace/01_nyc_environmental_pipeline.ipynb` from the top.
 
 ## Iceberg / Trino Issues
 

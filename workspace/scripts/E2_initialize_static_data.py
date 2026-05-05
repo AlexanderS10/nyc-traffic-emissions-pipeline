@@ -8,7 +8,7 @@ Uploads into:
   s3://raw-data/static/building_energy/
 
 Run (inside container):
-  docker exec -it jupyter-pyspark python /home/jovyan/work/scripts/initialize_static_data.py
+  docker exec -it jupyter-pyspark python /home/jovyan/work/scripts/E2_initialize_static_data.py
 """
 
 from __future__ import annotations
