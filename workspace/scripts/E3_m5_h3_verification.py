@@ -23,7 +23,7 @@ import h3
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
 
-EXPECTED_H3_RESOLUTION = 8
+EXPECTED_H3_RESOLUTION = 7
 H3_HEX_RE = re.compile(r"^[0-9a-f]{15}$")
 
 

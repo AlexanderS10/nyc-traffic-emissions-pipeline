@@ -117,6 +117,11 @@ docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/E3_m4_data_q
 docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/E3_m5_h3_verification.py
 ```
 
+If a borough appears in raw traffic counts but shows `avg_pm25 = NULL` in
+`workspace/02_live_data_exploration.ipynb`, reduce H3 granularity (for example,
+resolution 8 -> 7) and re-run the business stream. This widens spatial matching
+for sparse AQ coverage areas such as Bronx.
+
 **Epic 3 — Milestone 6: H3 vs geometry benchmark**
 
 ```bash
@@ -128,12 +133,20 @@ docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/E3_m6_h3_vs_
 Tip: after running, open Spark UI SQL tab and fill the report's TODO fields for
 task/shuffle metrics on both benchmark queries.
 
+**Epic 4 common failure modes (joins + enrichment):**
+
+- **Late data mismatch / sparse AQ joins:** if a borough keeps `avg_pm25 = NULL` while raw traffic exists, keep AQ join at 15 minutes and reduce H3 granularity (for example, resolution 8 -> 7). Re-run the business stream from a clean business checkpoint namespace.
+- **Weather join not contributing rows:** verify weather producer offsets are advancing and confirm `weather_event_ts` is non-null in raw weather sink (`s3a://raw-data/weather/`). Run `python scripts/E4_m4_weather_enrichment_verification.py`.
+- **Static lookup sparsity:** rerun static lookup build after enough raw traffic seed coverage is present; then rerun business stream cells. Validate with `python scripts/E4_m5_static_lookup_verification.py`.
+- **Checkpoint incompatibility after schema/state changes:** bump `CHECKPOINT_PATH` suffix or clear the exact checkpoint prefix before restart. For current config, clear `local.db.enriched_traffic_v4` if reusing that suffix.
+- **Unexpected stream stalls/perf regression after static enrichment:** watch `[stream_metrics]` logs in the final notebook cell and Spark UI SQL tab; sustained growth in `trigger_execution_ms` suggests join/select plan pressure and should trigger a reduced test volume rerun.
+
 **Stale checkpoint causing schema mismatch:**
 
 ```bash
 # Option A (targeted): clear only the business stream checkpoint when
 # local.db.enriched_traffic schema/state changes (current version shown)
-docker exec -it minio mc rm -r --force myminio/business-data/checkpoints/local.db.enriched_traffic_v3/
+docker exec -it minio mc rm -r --force myminio/business-data/checkpoints/local.db.enriched_traffic_v4/
 
 # Option B (full reset): clear all checkpoints and restart from the top
 docker exec -it minio mc rm -r --force myminio/raw-data/checkpoints/

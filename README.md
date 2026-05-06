@@ -18,7 +18,7 @@ OpenWeatherMap API ──┘    Topics                  H3 Spatial Join
 ```
 
 1. Ingestion (Redpanda/Kafka): Python producers poll NYC DOT, OpenAQ, PurpleAir, and OpenWeatherMap APIs and publish JSON payloads into dedicated Kafka topics.
-2. Stream Processing (PySpark 4.0.2): Spark Structured Streaming consumes topics, applies event-time watermarking, and assigns H3 hex grid IDs (resolution 5) for spatial indexing.
+2. Stream Processing (PySpark 4.0.2): Spark Structured Streaming consumes topics, applies event-time watermarking, and assigns H3 hex grid IDs (resolution 7) for spatial indexing.
 3. Multi-Stream Join: Traffic nodes and air sensors sharing the same H3 grid cell are joined within a 15-minute sliding window. Weather data joins on a 15-minute window using a broadcast key. Apache Sedona performs spatial joins between live traffic points and static polygon layers to isolate confounding variables.
 4. Medallion Storage (MinIO + Apache Iceberg): The pipeline writes into three buckets: `raw-data` for raw Kafka JSON landed as Parquet, `refined-data` for cleaned and spatially indexed Parquet, and `business-data` for the final Apache Iceberg table.
 5. Serving Layer (Trino + Grafana): Trino queries the Iceberg tables in `business-data`, powering a live Grafana dashboard with borough-level traffic and air quality panels.
@@ -245,6 +245,35 @@ spark.sql("""
     ORDER BY avg_speed DESC
 """).show()
 ```
+
+### Step 5: Epic 4 End-to-End Validation Runbook
+
+Use this sequence when validating the full Epic 4 path (traffic + AQ + weather + static flags):
+
+1. Start producers (`workspace/run_all.py`) and keep them running.
+2. Open `workspace/01_nyc_environmental_pipeline.ipynb` and run all cells in order.
+3. Keep the final stream-monitor cell running and watch `[stream_metrics]` logs for:
+   - `batch_id`
+   - `numInputRows`
+   - `processedRowsPerSecond`
+   - `trigger_execution_ms`
+4. Open `workspace/02_live_data_exploration.ipynb` and run all diagnostics cells.
+5. Run Epic 4 verification scripts from the `jupyter-pyspark` container:
+
+```bash
+docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/E4_m3_state_recovery_verification.py
+docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/E4_m4_weather_enrichment_verification.py
+docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/E4_m5_static_lookup_verification.py
+docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/E4_m6_static_enrichment_verification.py
+docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/E4_m7_acceptance_snapshot.py
+```
+
+Current local defaults used for reviewed runs:
+
+- H3 resolution: `7`
+- AQ join window: `15 minutes`
+- Weather join window: `15 minutes`
+- Business checkpoint path: `s3a://business-data/checkpoints/local.db.enriched_traffic_v4`
 
 ## Project Documentation
 
