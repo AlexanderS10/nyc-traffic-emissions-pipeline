@@ -215,3 +215,136 @@ SHOW TABLES FROM iceberg.db;
 **Trino 403 Forbidden on S3:**
 
 Ensure `iceberg.properties` in `trino_config/` contains the correct MinIO endpoint and credentials and that the file is mounted into the Trino container in `docker-compose.yml`.
+
+
+### Dashboard Empty-Windows
+
+Some panels can legitimately return no data for restrictive filter combinations.
+This is especially common when:
+
+- `congestion_zone = true`
+- `truck_route = false`
+- AQ-matched rows are sparse in the selected time window
+
+When a panel is empty:
+
+1. Switch one or both variables back to `All`.
+2. Widen the dashboard time range.
+3. For AQ panels, verify the underlying table still has AQ matches:
+
+```sql
+SELECT
+    COUNT(*) AS total_rows,
+    COUNT(aq_pm25_ugm3) AS rows_with_pm25
+FROM iceberg.db.enriched_traffic
+WHERE traffic_event_ts BETWEEN from_iso8601_timestamp('${__from:date:iso}')
+                          AND from_iso8601_timestamp('${__to:date:iso}')
+```
+
+4. For confounder-specific emptiness, inspect the slice directly:
+
+```sql
+SELECT
+    is_congestion_zone,
+    is_truck_route,
+    COUNT(*) AS rows,
+    COUNT(aq_pm25_ugm3) AS pm25_rows
+FROM iceberg.db.enriched_traffic
+WHERE traffic_event_ts BETWEEN from_iso8601_timestamp('${__from:date:iso}')
+                          AND from_iso8601_timestamp('${__to:date:iso}')
+GROUP BY is_congestion_zone, is_truck_route
+ORDER BY rows DESC
+```
+
+### Grafana / Dashboard Issues
+
+**Grafana Trino plugin install returns 404:**
+
+Use the current plugin id:
+
+```bash
+docker exec -it grafana grafana cli plugins install trino-datasource
+docker restart grafana
+```
+
+Do not use the older `grafana-trino-datasource` id.
+
+**Grafana datasource test fails:**
+
+Verify the datasource points at the Docker service hostname, not host loopback:
+
+- URL: `http://trino:8080`
+- Catalog: `iceberg`
+- Schema: `db`
+
+Then verify Trino directly:
+
+```bash
+docker exec -it trino trino --catalog iceberg --schema db --execute "SHOW TABLES"
+```
+
+**Grafana Explore works but dashboard panel query fails:**
+
+Common causes:
+
+- panel query still uses an old fixed-window example
+- variable substitution syntax does not match the current dashboard variables
+- the panel is filtering into an empty data slice
+
+Use the current variable-safe filter pattern:
+
+```sql
+AND ('${congestion_zone}' = 'All' OR CAST(is_congestion_zone AS varchar) = '${congestion_zone}')
+AND ('${truck_route}' = 'All' OR CAST(is_truck_route AS varchar) = '${truck_route}')
+```
+
+**Restrictive confounder combinations return no data:**
+
+This can be expected. In local runs, combinations such as:
+
+- `congestion_zone = true`
+- `truck_route = false`
+
+may legitimately produce no rows in the selected time window.
+
+Fallback:
+
+1. Switch one or both variables back to `All`.
+2. Widen the dashboard time range.
+3. Inspect the boolean slice counts in Trino using the query above.
+
+**Geomap only shows Manhattan / Bronx-heavy points:**
+
+This usually reflects the AQ-matched traffic distribution in
+`iceberg.db.enriched_traffic`, not a rendering bug. Validate with:
+
+```sql
+SELECT
+    traffic_borough,
+    COUNT(*) AS rows_with_pm25,
+    COUNT(DISTINCT CAST(traffic_lat AS varchar) || ',' || CAST(traffic_lon AS varchar)) AS distinct_points_with_pm25
+FROM iceberg.db.enriched_traffic
+WHERE aq_pm25_ugm3 IS NOT NULL
+  AND traffic_lat IS NOT NULL
+  AND traffic_lon IS NOT NULL
+GROUP BY traffic_borough
+ORDER BY rows_with_pm25 DESC
+```
+
+**AQ panels are empty even though traffic panels have data:**
+
+Possible causes:
+
+- AQ producers are failing upstream
+- Docker container DNS cannot resolve OpenAQ / PurpleAir
+- AQ-matched rows are sparse for the selected time/filter slice
+
+Check DNS from the Jupyter container:
+
+```bash
+docker exec -it jupyter-pyspark python -c "import socket; print(socket.gethostbyname('api.openaq.org'))"
+docker exec -it jupyter-pyspark python -c "import socket; print(socket.gethostbyname('api.purpleair.com'))"
+```
+
+If host DNS works but container DNS fails intermittently, restart Docker Desktop
+and consider configuring stable DNS resolvers for Docker.

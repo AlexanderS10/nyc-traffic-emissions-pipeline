@@ -3,7 +3,7 @@
 ## Install the Trino Plugin
 
 ```bash
-docker exec -it grafana grafana-cli plugins install grafana-trino-datasource
+docker exec -it grafana grafana cli plugins install trino-datasource
 docker restart grafana
 ```
 
@@ -47,6 +47,28 @@ ORDER BY avg_speed_mph DESC;
 
 ## Example Panel Queries
 
+**General Feedback-Loop Query (dashboard variable aware):**
+
+```sql
+SELECT
+    date_trunc('minute', traffic_event_ts) AS time,
+    AVG(traffic_speed) AS avg_speed,
+    AVG(aq_pm25_ugm3) AS avg_pm25
+FROM iceberg.db.enriched_traffic
+WHERE traffic_event_ts BETWEEN from_iso8601_timestamp('${__from:date:iso}')
+                          AND from_iso8601_timestamp('${__to:date:iso}')
+  AND ('${congestion_zone}' = 'All' OR CAST(is_congestion_zone AS varchar) = '${congestion_zone}')
+  AND ('${truck_route}' = 'All' OR CAST(is_truck_route AS varchar) = '${truck_route}')
+GROUP BY 1
+ORDER BY 1
+```
+
+This query is the recommended baseline because it:
+
+- uses the Grafana dashboard time picker instead of a fixed trailing interval
+- keeps panel output aligned with the pipeline's 15-minute join cadence
+- supports dashboard-wide boolean filtering without Trino cast errors
+
 **Borough Average Speed (Time Series):**
 
 ```sql
@@ -55,7 +77,10 @@ SELECT
     traffic_borough,
     AVG(traffic_speed) AS avg_speed
 FROM iceberg.db.enriched_traffic
-WHERE traffic_event_ts >= now() - INTERVAL '2' HOUR
+WHERE traffic_event_ts BETWEEN from_iso8601_timestamp('${__from:date:iso}')
+                          AND from_iso8601_timestamp('${__to:date:iso}')
+  AND ('${congestion_zone}' = 'All' OR CAST(is_congestion_zone AS varchar) = '${congestion_zone}')
+  AND ('${truck_route}' = 'All' OR CAST(is_truck_route AS varchar) = '${truck_route}')
 GROUP BY 1, 2
 ORDER BY 1
 ```
@@ -69,7 +94,10 @@ SELECT
     AVG(aq_pm25_ugm3) AS avg_pm25
 FROM iceberg.db.enriched_traffic
 WHERE aq_pm25_ugm3 IS NOT NULL
-  AND traffic_event_ts >= now() - INTERVAL '2' HOUR
+  AND traffic_event_ts BETWEEN from_iso8601_timestamp('${__from:date:iso}')
+                          AND from_iso8601_timestamp('${__to:date:iso}')
+  AND ('${congestion_zone}' = 'All' OR CAST(is_congestion_zone AS varchar) = '${congestion_zone}')
+  AND ('${truck_route}' = 'All' OR CAST(is_truck_route AS varchar) = '${truck_route}')
 GROUP BY 1
 ORDER BY 1
 ```
@@ -92,19 +120,22 @@ GROUP BY traffic_borough
 
 Create two Grafana Custom variables named `congestion_zone` and `truck_route`.
 
-Use Key:Value pairs in the custom values field so Trino receives lowercase boolean strings correctly:
+Use these custom values so the dashboard can either show all data or apply a
+specific boolean filter:
 
 ```text
-True : true, False : false
+All,false,true
 ```
 
-This avoids the common casting issue where Trino treats mixed-case boolean-like strings as plain text instead of booleans.
+Set `All` as the default value for both variables. This keeps the dashboard
+populated on first load and avoids accidentally filtering into empty slices when
+some confounder combinations are sparse in the current time range.
 
 Example dashboard filter pattern:
 
 ```sql
-WHERE congestion_zone = CAST(${congestion_zone} AS BOOLEAN)
-  AND truck_route = CAST(${truck_route} AS BOOLEAN)
+WHERE ('${congestion_zone}' = 'All' OR CAST(is_congestion_zone AS varchar) = '${congestion_zone}')
+  AND ('${truck_route}' = 'All' OR CAST(is_truck_route AS varchar) = '${truck_route}')
 ```
 
 ### 2. Dual-Axis Time Series
@@ -131,8 +162,171 @@ Lock the dashboard timezone to `America/New_York` in Dashboard General Settings 
 
 Use one comparison panel per visual state:
 
-- Residential Streets: `truck_route = false`, `congestion_zone = false`
-- Outer Highways: `truck_route = true`, `congestion_zone = false`
-- Manhattan Gridlock: `truck_route = true`, `congestion_zone = true`
+- Residential Streets: `is_truck_route = false`, `is_congestion_zone = false`
+- Outer Highways: `is_truck_route = true`, `is_congestion_zone = false`
+- Manhattan Gridlock: `is_truck_route = true`, `is_congestion_zone = true`
 
 That structure makes the causal story easier to inspect directly in the UI.
+
+
+## Geomap Panels
+
+Use two complementary Geomap panels:
+
+- a point-level hotspot map showing AQ-matched traffic points
+- a borough-summary map showing one marker per borough
+
+### Panel 1: AQ-Matched Traffic Points
+
+Use this query for the detailed hotspot map:
+
+```sql
+SELECT
+    traffic_event_ts AS time,
+    traffic_borough,
+    traffic_lat AS latitude,
+    traffic_lon AS longitude,
+    ROUND(AVG(traffic_speed), 2) AS avg_speed,
+    ROUND(AVG(aq_pm25_ugm3), 2) AS avg_pm25,
+    COUNT(*) AS point_count
+FROM iceberg.db.enriched_traffic
+WHERE traffic_event_ts BETWEEN from_iso8601_timestamp('${__from:date:iso}')
+                          AND from_iso8601_timestamp('${__to:date:iso}')
+  AND aq_pm25_ugm3 IS NOT NULL
+  AND traffic_lat IS NOT NULL
+  AND traffic_lon IS NOT NULL
+  AND ('${congestion_zone}' = 'All' OR CAST(is_congestion_zone AS varchar) = '${congestion_zone}')
+  AND ('${truck_route}' = 'All' OR CAST(is_truck_route AS varchar) = '${truck_route}')
+GROUP BY 1, 2, 3, 4
+ORDER BY time
+LIMIT 1000
+```
+
+Recommended Grafana Geomap configuration:
+
+- Visualization: `Geomap`
+- Location mode: `Coordinates`
+- Latitude field: `latitude`
+- Longitude field: `longitude`
+- Marker color: `avg_pm25`
+- Marker size: `point_count`
+- Tooltip: enabled
+- Initial map center:
+  - Latitude: `40.7128`
+  - Longitude: `-74.0060`
+  - Zoom: `10`
+
+
+### Panel 2: Borough AQ Summary
+
+Use this query for one borough-level marker per borough:
+
+```sql
+SELECT
+    traffic_borough,
+    ROUND(AVG(traffic_lat), 6) AS latitude,
+    ROUND(AVG(traffic_lon), 6) AS longitude,
+    COUNT(*) AS rows,
+    ROUND(AVG(traffic_speed), 2) AS avg_speed,
+    ROUND(AVG(aq_pm25_ugm3), 2) AS avg_pm25
+FROM iceberg.db.enriched_traffic
+WHERE aq_pm25_ugm3 IS NOT NULL
+  AND traffic_lat IS NOT NULL
+  AND traffic_lon IS NOT NULL
+  AND traffic_event_ts BETWEEN from_iso8601_timestamp('${__from:date:iso}')
+                          AND from_iso8601_timestamp('${__to:date:iso}')
+  AND ('${congestion_zone}' = 'All' OR CAST(is_congestion_zone AS varchar) = '${congestion_zone}')
+  AND ('${truck_route}' = 'All' OR CAST(is_truck_route AS varchar) = '${truck_route}')
+GROUP BY traffic_borough
+```
+
+Recommended Grafana Geomap configuration:
+
+- Visualization: `Geomap`
+- Location mode: `Coordinates`
+- Latitude field: `latitude`
+- Longitude field: `longitude`
+- Marker size: `rows`
+- Marker color:
+  - either fixed color for a clean borough summary
+  - or `avg_speed` if you want borough markers colored by average speed
+- Tooltip: enabled
+- Initial map center:
+  - Latitude: `40.7128`
+  - Longitude: `-74.0060`
+  - Zoom: `10`
+
+The point-level map can look sparse or concentrated because AQ-matched joins
+  happen at a limited set of traffic coordinates.
+
+## Epic 6 Milestone 6: End-to-End Runbook
+
+### Bring-Up Order
+
+1. Start the stack:
+
+```bash
+docker compose up -d --build
+```
+
+2. Confirm core services are healthy:
+
+```bash
+docker compose ps
+```
+
+3. Initialize static datasets if needed:
+
+See the `Static Data Onboarding` section in [README.md](nyc-traffic-emissions-pipeline/README.md).
+
+
+4. Start the data producers:
+
+```bash
+docker exec -it -w /home/jovyan/work jupyter-pyspark bash
+python run_all.py
+```
+
+5. Open Jupyter and run the streaming notebook:
+
+- URL: `http://localhost:8888?token=bigdata`
+- Open `01_nyc_environmental_pipeline.ipynb`
+- Run all cells and keep the final streaming cell active
+
+6. Verify the business table exists and has rows:
+
+```bash
+docker exec -it trino trino --catalog iceberg --schema db --execute "SELECT COUNT(*) FROM enriched_traffic"
+```
+
+7. Open Grafana:
+
+- URL: `http://localhost:3000`
+- Login: `admin / admin`
+
+8. Verify the Trino datasource:
+
+- `Connections -> Data sources -> Trino`
+- Click `Save & Test`
+- In `Explore`, run:
+
+```sql
+SELECT *
+FROM iceberg.db.enriched_traffic
+LIMIT 5
+```
+
+9. Build or open the dashboard panels:
+
+- general feedback-loop time series
+- borough speed time series
+- point-level AQ Geomap
+- borough AQ summary Geomap
+
+10. Set dashboard defaults:
+
+- time range: `Last 24 hours`
+- `congestion_zone = All`
+- `truck_route = All`
+- dashboard timezone: `America/New_York`
+- refresh: start at `1m`
