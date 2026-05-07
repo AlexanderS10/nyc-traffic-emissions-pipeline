@@ -12,6 +12,11 @@ RUN wget -q https://archive.apache.org/dist/spark/spark-4.0.2/spark-4.0.2-bin-ha
 # ── Install GDAL system library (required by geopandas/fiona for shapefiles) ─
 RUN apt-get update --quiet && apt-get install --quiet -y libgdal-dev && rm -rf /var/lib/apt/lists/*
 
+RUN /usr/local/spark/bin/spark-shell \
+    --packages "org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.10.1,org.apache.hadoop:hadoop-aws:3.4.1,software.amazon.awssdk:bundle:2.29.38" \
+    --conf spark.driver.memory=1g \
+    -e "System.exit(0)" || true
+
 USER ${NB_UID}
 
 RUN pip install --quiet --no-cache-dir \
