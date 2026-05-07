@@ -52,7 +52,7 @@ The largest technical limitation is the cross-product effect created by the H3 s
 
 Importantly, this does not invalidate the downstream analytical averages. The Trino-side `AVG()` aggregations remain accurate because the duplicated records are still consistently represented in the final grouped computation. The issue is efficiency, not correctness.
 
-The recommended production optimization is to pre-aggregate each stream before the join. For example, traffic and air-quality inputs could be reduced into tumbling 1-minute windows, then joined at that lower cardinality. That would materially reduce state size, lower storage cost, and improve streaming performance while preserving the analytical signal needed for dashboard-level comparisons.
+The recommended production optimization is to reduce join state size through coarser H3 resolution or a narrower temporal join window. Pre-aggregating the AQ stream into 1-minute tumbling windows before the join was evaluated during development but caused the stream-to-stream join to produce zero output rows. The root cause is watermark chaining delay between the aggregation stage and the join stage — by the time aggregated windows are released, the traffic watermark has already advanced past the join window, causing right-side rows to be dropped. Tuning H3 resolution and join window duration are lower-risk levers that preserve streaming correctness while reducing state footprint.
 
 Other practical limitations remain. OpenAQ coverage is sparse in parts of NYC, PurpleAir timestamps are approximated from ingestion time, and the system currently favors local development simplicity over scale-out parallelism.
 

@@ -15,8 +15,6 @@
 
 The pipeline successfully enriched **4.3 million records** across all five boroughs in a ~2.5 hour window. Weather joined at 100%, and air quality joined at 86.3% — meaning roughly 1 in 7 traffic events had no nearby AQ sensor within the 15-minute spatial window, which is expected given NYC's sparse sensor coverage in outer boroughs.
 
-> **Note on record count:** The 4.3M figure reflects a known cross-product fanout from the H3 stream-to-stream join — one traffic sensor can match hundreds of AQ readings within the same hex cell and time window. For example, a single Manhattan sensor (id=124) accumulated 706,020 AQ matches. The downstream `AVG()` aggregations remain correct; this is an efficiency issue, not a correctness one. The recommended production fix is pre-aggregating each stream into 1-minute tumbling windows before the join.
-
 ---
 
 ## 2. Borough-Level Overview
@@ -117,7 +115,7 @@ Queens cells near truck routes (12.94 mph) show very low PM2.5 (1.35 µg/m³), c
 | Staten Island | 858 | 301,980 | ~352x |
 | Queens | 1,221 | 444,710 | ~364x |
 
-The join fanout is expected behavior from the stream-to-stream H3 join — each raw traffic row matches multiple AQ sensor readings within the 15-minute window. The high fanout in Brooklyn and Manhattan reflects denser AQ sensor coverage in those boroughs causing more matches per traffic event. The recommended production optimization is to pre-aggregate both streams into 1-minute tumbling windows before joining, which would reduce state size and storage footprint while preserving analytical accuracy.
+The join fanout is a known architectural trade-off of the H3 stream-to-stream join strategy. Pre-aggregating the AQ stream into 1-minute tumbling windows before the join was attempted as an optimization but caused the stream-to-stream join to produce zero output rows due to watermark chaining delays between the aggregation stage and the join stage in Spark Structured Streaming. The downstream AVG() aggregations in Trino remain correct; the fanout is an efficiency characteristic of the current design rather than a correctness issue.
 
 ---
 
@@ -130,5 +128,7 @@ The minimum AQ event timestamp in the enriched table is `2016-03-10 08:00:00` �
 ## 10. Summary
 
 The pipeline successfully demonstrated the core thesis: **traffic congestion correlates with elevated PM2.5 across NYC boroughs.** Gridlock conditions (under 10 mph) produced PM2.5 readings more than double those observed under free-flow conditions (45+ mph). The truck route flag exposed an independent freight emissions baseline that persists even at faster speeds, confirming that confounding variables meaningfully shape the air quality signal and must be controlled for to isolate passenger car effects.
+
+Pre-aggregation of the AQ stream was evaluated as a production optimization but is incompatible with the current watermark chaining configuration in Spark 4.0.2. The practical efficiency levers available without architectural changes are coarser H3 resolution or a narrower temporal join window.
 
 The primary limitations observed in this run are the short collection window (~2.5 hours, late evening only), sparse AQ coverage in Queens and Staten Island, no congestion zone records captured, and a single wind speed category preventing atmospheric dispersion analysis. A 24-hour continuous run with producers active through peak morning rush would substantially strengthen all findings.
