@@ -57,8 +57,8 @@ SELECT
 FROM iceberg.db.enriched_traffic
 WHERE traffic_event_ts BETWEEN from_iso8601_timestamp('${__from:date:iso}')
                           AND from_iso8601_timestamp('${__to:date:iso}')
-  AND ('${congestion_zone}' = 'All' OR CAST(is_congestion_zone AS varchar) = '${congestion_zone}')
-  AND ('${truck_route}' = 'All' OR CAST(is_truck_route AS varchar) = '${truck_route}')
+  AND ('${congestion_zone}' = 'All' OR CAST(is_in_congestion_zone AS varchar) = '${congestion_zone}')
+  AND ('${truck_route}' = 'All' OR CAST(is_near_truck_route AS varchar) = '${truck_route}')
 GROUP BY 1
 ORDER BY 1
 ```
@@ -79,8 +79,8 @@ SELECT
 FROM iceberg.db.enriched_traffic
 WHERE traffic_event_ts BETWEEN from_iso8601_timestamp('${__from:date:iso}')
                           AND from_iso8601_timestamp('${__to:date:iso}')
-  AND ('${congestion_zone}' = 'All' OR CAST(is_congestion_zone AS varchar) = '${congestion_zone}')
-  AND ('${truck_route}' = 'All' OR CAST(is_truck_route AS varchar) = '${truck_route}')
+  AND ('${congestion_zone}' = 'All' OR CAST(is_in_congestion_zone AS varchar) = '${congestion_zone}')
+  AND ('${truck_route}' = 'All' OR CAST(is_near_truck_route AS varchar) = '${truck_route}')
 GROUP BY 1, 2
 ORDER BY 1
 ```
@@ -96,8 +96,8 @@ FROM iceberg.db.enriched_traffic
 WHERE aq_pm25_ugm3 IS NOT NULL
   AND traffic_event_ts BETWEEN from_iso8601_timestamp('${__from:date:iso}')
                           AND from_iso8601_timestamp('${__to:date:iso}')
-  AND ('${congestion_zone}' = 'All' OR CAST(is_congestion_zone AS varchar) = '${congestion_zone}')
-  AND ('${truck_route}' = 'All' OR CAST(is_truck_route AS varchar) = '${truck_route}')
+  AND ('${congestion_zone}' = 'All' OR CAST(is_in_congestion_zone AS varchar) = '${congestion_zone}')
+  AND ('${truck_route}' = 'All' OR CAST(is_near_truck_route AS varchar) = '${truck_route}')
 GROUP BY 1
 ORDER BY 1
 ```
@@ -134,8 +134,8 @@ some confounder combinations are sparse in the current time range.
 Example dashboard filter pattern:
 
 ```sql
-WHERE ('${congestion_zone}' = 'All' OR CAST(is_congestion_zone AS varchar) = '${congestion_zone}')
-  AND ('${truck_route}' = 'All' OR CAST(is_truck_route AS varchar) = '${truck_route}')
+WHERE ('${congestion_zone}' = 'All' OR CAST(is_in_congestion_zone AS varchar) = '${congestion_zone}')
+  AND ('${truck_route}' = 'All' OR CAST(is_near_truck_route AS varchar) = '${truck_route}')
 ```
 
 ### 2. Dual-Axis Time Series
@@ -162,9 +162,9 @@ Lock the dashboard timezone to `America/New_York` in Dashboard General Settings 
 
 Use one comparison panel per visual state:
 
-- Residential Streets: `is_truck_route = false`, `is_congestion_zone = false`
-- Outer Highways: `is_truck_route = true`, `is_congestion_zone = false`
-- Manhattan Gridlock: `is_truck_route = true`, `is_congestion_zone = true`
+- Residential Streets: `is_near_truck_route = false`, `is_in_congestion_zone = false`
+- Outer Highways: `is_near_truck_route = true`, `is_in_congestion_zone = false`
+- Manhattan Gridlock: `is_near_truck_route = true`, `is_in_congestion_zone = true`
 
 That structure makes the causal story easier to inspect directly in the UI.
 
@@ -195,8 +195,8 @@ WHERE traffic_event_ts BETWEEN from_iso8601_timestamp('${__from:date:iso}')
   AND aq_pm25_ugm3 IS NOT NULL
   AND traffic_lat IS NOT NULL
   AND traffic_lon IS NOT NULL
-  AND ('${congestion_zone}' = 'All' OR CAST(is_congestion_zone AS varchar) = '${congestion_zone}')
-  AND ('${truck_route}' = 'All' OR CAST(is_truck_route AS varchar) = '${truck_route}')
+  AND ('${congestion_zone}' = 'All' OR CAST(is_in_congestion_zone AS varchar) = '${congestion_zone}')
+  AND ('${truck_route}' = 'All' OR CAST(is_near_truck_route AS varchar) = '${truck_route}')
 GROUP BY 1, 2, 3, 4
 ORDER BY time
 LIMIT 1000
@@ -235,8 +235,8 @@ WHERE aq_pm25_ugm3 IS NOT NULL
   AND traffic_lon IS NOT NULL
   AND traffic_event_ts BETWEEN from_iso8601_timestamp('${__from:date:iso}')
                           AND from_iso8601_timestamp('${__to:date:iso}')
-  AND ('${congestion_zone}' = 'All' OR CAST(is_congestion_zone AS varchar) = '${congestion_zone}')
-  AND ('${truck_route}' = 'All' OR CAST(is_truck_route AS varchar) = '${truck_route}')
+  AND ('${congestion_zone}' = 'All' OR CAST(is_in_congestion_zone AS varchar) = '${congestion_zone}')
+  AND ('${truck_route}' = 'All' OR CAST(is_near_truck_route AS varchar) = '${truck_route}')
 GROUP BY traffic_borough
 ```
 
