@@ -212,6 +212,27 @@ SHOW SCHEMAS FROM iceberg;
 SHOW TABLES FROM iceberg.db;
 ```
 
+**Iceberg `NoSuchTableException` with missing metadata file (`Location does not exist ...metadata.json`):**
+
+This usually means REST catalog metadata is stale relative to objects in
+`business-data` (for example after manual table/checkpoint cleanup).
+
+```bash
+# 1) Try a normal catalog restart first
+docker compose restart rest-catalog
+
+# 2) If the same error persists, force container recreation
+docker compose up -d --force-recreate rest-catalog
+
+# 3) Verify catalog health before rerunning notebook DDL/write cells
+docker compose ps rest-catalog
+docker logs rest-catalog --tail=50
+curl http://localhost:8181/v1/config
+```
+
+If needed, pair the catalog recreate with the full data reset steps above
+(checkpoint + table path cleanup) before rerunning the pipeline notebook.
+
 **Trino 403 Forbidden on S3:**
 
 Ensure `iceberg.properties` in `trino_config/` contains the correct MinIO endpoint and credentials and that the file is mounted into the Trino container in `docker-compose.yml`.

@@ -106,7 +106,7 @@ It also provisions the application-scoped MinIO user (`MINIO_APP_ACCESS_KEY` / `
 
 ### 5. Static Data Onboarding
 
-Preferred (automated): run the one-shot onboarding utility inside Jupyter:
+Preferred (automated): run the one-shot onboarding utility inside Jupyter [This script does not download NYC Truck Routes (Probably due to multiple files being downloaded within the request; default to the Manual Fallback)]:
 
 ```bash
 docker exec -it -w /home/jovyan/work jupyter-pyspark python scripts/E2_initialize_static_data.py
@@ -230,6 +230,16 @@ Spark Session Ready! Version: 4.0.2
 ```
 
 The streaming query commits micro-batches every 30 seconds. Monitor progress in the Spark UI at http://localhost:4040 while the streaming job is running from Jupyter.
+
+If Iceberg DDL/write cells fail with `NoSuchTableException` and
+`Location does not exist ...metadata.json`, restart `rest-catalog`. If a normal
+restart does not clear it, force recreate the container:
+
+```bash
+docker compose up -d --force-recreate rest-catalog
+```
+
+Then rerun the failed notebook cells. See `docs/TROUBLESHOOTING.md` for the full recovery flow.
 
 ### Step 4: Query the Live Data
 
