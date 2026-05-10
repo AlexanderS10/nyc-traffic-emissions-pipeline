@@ -102,6 +102,56 @@ GROUP BY 1
 ORDER BY 1
 ```
 
+**Residential Streets: PM2.5 vs Traffic Speed Correlation (Line Graph):**
+
+```sql
+SELECT
+  date_trunc('minute', traffic_event_ts) AS time,
+  CAST(AVG(traffic_speed) AS DOUBLE) AS avg_speed,
+  CAST(AVG(aq_pm25_ugm3) AS DOUBLE) AS avg_pm25
+FROM iceberg.db.enriched_traffic
+WHERE traffic_event_ts BETWEEN from_iso8601_timestamp('${__from:date:iso}')
+                          AND from_iso8601_timestamp('${__to:date:iso}')
+  AND aq_pm25_ugm3 IS NOT NULL
+  AND is_in_congestion_zone = false
+  AND is_near_truck_route = false
+GROUP BY date_trunc('minute', traffic_event_ts)
+ORDER BY time ASC
+```
+
+**Outer Highways: PM2.5 vs Traffic Speed Correlation (Line Graph):**
+
+```sql
+SELECT
+  date_trunc('minute', traffic_event_ts) AS time,
+  CAST(AVG(traffic_speed) AS DOUBLE) AS avg_speed,
+  CAST(AVG(aq_pm25_ugm3) AS DOUBLE) AS avg_pm25
+FROM iceberg.db.enriched_traffic
+WHERE traffic_event_ts BETWEEN from_iso8601_timestamp('${__from:date:iso}')
+                          AND from_iso8601_timestamp('${__to:date:iso}')
+  AND aq_pm25_ugm3 IS NOT NULL
+  AND is_in_congestion_zone = false
+  AND is_near_truck_route = true
+GROUP BY date_trunc('minute', traffic_event_ts)
+ORDER BY time ASC
+```
+
+**AQ Join Coverage Over Time (Hourly, Bar Graph):**
+
+```sql
+SELECT
+  date_trunc('hour', traffic_event_ts) AS time,
+  CAST(
+    100.0 * SUM(CASE WHEN aq_pm25_ugm3 IS NOT NULL THEN 1 ELSE 0 END)
+    / CAST(COUNT(*) AS DOUBLE)
+    AS DOUBLE
+  ) AS aq_join_coverage_percent
+FROM iceberg.db.enriched_traffic
+WHERE $__timeFilter(traffic_event_ts)
+GROUP BY 1
+ORDER BY 1 ASC
+```
+
 **Current Borough Speed Heatmap:**
 
 ```sql
@@ -318,10 +368,13 @@ LIMIT 5
 
 9. Build or open the dashboard panels:
 
-- general feedback-loop time series
-- borough speed time series
-- point-level AQ Geomap
-- borough AQ summary Geomap
+- General Feedback-Loop Query (Time Series) \[Optional\]
+- Residential Streets: PM2.5 vs Traffic Speed Correlation
+- Outer Highways: PM2.5 vs Traffic Speed Correlation
+- AQ join coverage over time (hourly)
+- Borough Average Speed (Time Series)
+- AQ-Matched Traffic Points Geomap
+- Borough AQ Summary Geomap
 
 10. Set dashboard defaults:
 
